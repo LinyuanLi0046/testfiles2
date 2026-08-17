@@ -16,8 +16,8 @@ Fixed shape/dtypes for this workspace:
 - `rnorm_weight`: `[2048]`, contiguous BF16 model parameter.
 - `eps`: runtime float, normally `1e-5`.
 - returns `(output BF16, residual_out FP32, fp32_out FP32)`.
-- M is dynamic: decode M=1..128; prefill M=4096/8192/9616/16384. M and
-  values derived from M must not become constexpr.
+- M is dynamic: decode M=1/2/4/8/16/32/64/128; prefill
+  M=4096/8192/9616/16384. M and values derived from M must not become constexpr.
 
 Exact arithmetic/rounding order:
 

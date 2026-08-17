@@ -54,7 +54,7 @@ including the cast after O-Norm and the cast to r-norm gamma dtype before the
 second FP32 reduction. This prevents the standalone test from silently using a
 numerically different path than the model.
 
-Coverage is every decode concurrency `M=1..128` plus prefill
+Decode coverage is `M=1,2,4,8,16,32,64,128`; prefill coverage is
 `M=4096,8192,9616,16384`, always with hidden_dim 2048. M stays a runtime value
 (`do_not_specialize`) so changing token count/batch concurrency does not cause
 shape-by-shape compilation.

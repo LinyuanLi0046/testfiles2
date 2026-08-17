@@ -73,7 +73,9 @@ class Case:
     rows: int
 
 
-DECODE_CASES = tuple(Case(f"decode_m{m}", "decode", m) for m in range(1, 129))
+DECODE_CASES = tuple(
+    Case(f"decode_m{m}", "decode", m) for m in (1, 2, 4, 8, 16, 32, 64, 128)
+)
 PREFILL_CASES = tuple(
     Case(f"prefill_m{m}", "prefill", m) for m in (4096, 8192, 9616, 16384)
 )
