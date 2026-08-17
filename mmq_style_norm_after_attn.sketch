@@ -549,7 +549,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   provisionally retained only as the explicitly requested cumulative base for
   R16.  Final retention is decided from the combined R16 result.
 
-### R16 — skip the first RMS result BF16 round trip (pending)
+### R16 — skip the first RMS result BF16 round trip (tested; not a latency win)
 
 - Unique kernel change on top of R15: replace `hs = onorm_out.to(BF16)` with
   `hs = onorm_out`, so residual addition consumes the FP32 first-RMS result.
@@ -558,8 +558,37 @@ frozen baseline, validate correctness first, then compare all target cases.
 - The FP32 `residual_out` now intentionally follows the unrounded first-RMS
   result, so both returned tensors are checked against an explicit R16
   reference and separately measured against strict production semantics.
-- Status: pending remote correctness, precision drift, Event, msprof, IR, and
-  pipeline profile.
+- Correctness: all 12 candidate cases PASS against the explicit R16 reference;
+  all 12 frozen-baseline cases remain PASS against strict production semantics.
+  Candidate max error versus its intended reference is 0.015625 for BF16
+  `output` and 1.43e-6 for FP32 `residual_out`.
+- Across all cases, max drift versus strict production is 0.03125 for `output`
+  and 0.015624 for `residual_out`; maximum per-case mean drift is 0.001452 and
+  0.001141 respectively.  At M16384 the means are 0.001433 and 0.001123.
+- M16384 Event is 412.192 us versus 572.060 us baseline (1.3878x), and msprof
+  is 374.633 us versus 534.472 us baseline (1.4267x).
+- Incremental versus R15, msprof regresses 373.658 -> 374.633 us (about 0.26%)
+  while Event is unchanged.  Mean AIV falls 365.82 -> 364.77 us and Vector
+  180.42 -> 176.31 us, but MTE2 rises 213.76 -> 216.91 us; the critical-path
+  tradeoff yields no end-to-end latency gain.
+- Final IR shrinks from 53,410 to 49,583 bytes, but this compiler simplification
+  does not translate into lower authoritative Task Duration.
+- Decision: the user-requested three-change combination is functionally tested
+  and remains staged only in `testfiles2` for review.  Under the latency skill's
+  3% gate, R16 is rejected as an optimization because it adds strict-semantic
+  drift without latency benefit.
+
+### Integration recommendation after the three requested experiments
+
+- R14 is the clear retained optimization: no arithmetic change, 14.1%
+  incremental msprof reduction versus R3, and 1.4135x versus frozen R0.
+- R15 adds about 1.04% beyond R14 but changes BF16 output values; it is below
+  the standalone retention gate and should be opt-in only.
+- R16 adds no latency gain and materially changes FP32 residual values; do not
+  integrate it for performance.
+- The combined R16 source is intentionally left in the standalone workspace so
+  the user can choose the integration contract.  No NEWSGLANG framework file
+  has been changed by these rounds.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
