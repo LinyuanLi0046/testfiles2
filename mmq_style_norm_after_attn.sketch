@@ -183,14 +183,39 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Candidate returned to the R0 noise band: decode 0.9979-1.0022x and prefill
   0.9909-1.0017x.
 
-### R3 — optimization point 11: load reordering (pending remote result)
+### R3 — optimization point 11: load reordering (accepted)
 
 - Unique change: move the independent FP32 residual load immediately after the
   BF16 hidden load and before the first RMS reduction.
 - Function/precision: residual is consumed at the identical add point; all
   arithmetic, casts, reductions, rounding boundaries, and stores are unchanged.
-- Expected IR impact: earlier residual MTE2 issue overlapping the first FP32
-  RMS reduction, with no extra UB value or GM traffic.
+- Correctness: all 12 candidate cases PASS; maximum errors match R0.
+- Timing: repeated NPU Event is authoritative for every case.
+- Decode: 0.9961-1.0054x, with no meaningful regression.
+- Prefill speedups for M=4096/8192/9616/16384: 1.2189x / 1.1784x /
+  1.1907x / 1.1977x.  Candidate times were 98.03 / 243.39 / 283.37 /
+  477.01 us.
+- Final IR confirms the intended mechanism: the residual GM-to-UB load moves
+  ahead of the first RMS vector reduction, allowing MTE2/vector overlap.  R0
+  and R3 have identical load/store, SET/WAIT, reduction, and outlined-vector
+  instruction counts; neither spills, and the main-kernel UB footprint remains
+  well below the A5 248 KiB capacity.
+- Decision: accepted as the current best candidate.
+
+### R4 — optimization point 30: IR-guided output conversion scheduling (pending)
+
+- Unique change: explicitly materialize the final BF16 output conversion before
+  starting the residual/fp32/BF16 store sequence.
+- Function/precision: the cast consumes the identical FP32 `rnorm_out`, and all
+  three stores retain their original values, masks, pointers, and order.  Both
+  required BF16 rounding boundaries remain unchanged.
+- IR basis: R3 final IR converts to BF16 only after two FP32 stores, forcing an
+  MTE3-to-vector synchronization in the middle of the output writeback sequence.
+- Expected IR impact: schedule the vector cast before MTE3 writeback starts,
+  remove that mid-sequence dependency, and leave three contiguous MTE3 stores.
+- Checklist: grid, grid-stride loop, int64 row addressing, exact 2048-wide block,
+  masks, FP32 reductions, and boundary casts are unchanged.  The empirically
+  required A5 scheduling/indexing exceptions established by R1/R2 are retained.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
