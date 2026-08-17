@@ -296,7 +296,31 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 5`
 - `ir_has_more_suggestions: false`
 
-### R3 rollback confirmation (awaiting remote result)
+### R3 rollback confirmation (`9c995f3`)
 
 - Candidate row-index expression is restored to production `%`; candidate is
   again identical to frozen R0 before point 6.
+- Correctness: all 26 records PASS.
+- M16384 msprof is 377.419 us candidate versus 377.833 us baseline
+  (1.0011x). Event is 427.436 versus 426.269 us (0.9973x).
+- Decision: rollback confirmed; both measurements are inside the established
+  noise band.
+
+### R4 — optimization point 6: int32 linear output addresses (awaiting remote result)
+
+- Hit condition: R0 explicitly casts the residual and dense output linear
+  offsets to int64, which can introduce avoidable scalar/address lowering on
+  Ascend vector cores.
+- Unique change: only candidate `r_offs` and `output_offs` are cast to int32.
+  The generic hidden-state address, kv division/remainder, grid, masks, loop,
+  tensor arithmetic, reduction, and stores are otherwise unchanged.
+- Bounds proof: the largest supported dense element offset is
+  `16384 * 2048 - 1 = 33,554,431`, far below signed-int32 maximum
+  `2,147,483,647`. Residual is allocated with the same dense row width.
+- Function and precision: address values remain exact. FP32 residual add and
+  reduction, BF16 gamma-input round, FP32 copy, and both BF16 outputs are
+  byte-for-byte unchanged.
+- Expected IR effect: keep the two dense linear address calculations in the
+  vector-friendly int32 domain and avoid unnecessary int64 materialization.
+- `hit_optimization_point: 6`
+- `ir_has_more_suggestions: false`
