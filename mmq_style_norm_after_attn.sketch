@@ -362,5 +362,27 @@ frozen baseline, validate correctness first, then compare all target cases.
   code generation for the existing dynamic grid-stride loop, so the observed
   timing difference is measurement noise and cannot satisfy the 3% gate.
 
+### R9 rollback confirmation (`951337f`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- M16384 msprof returns to the accepted R3 range at 439.70 us (1.2171x).
+- Event is elevated for both providers in this run (615.28 / 553.97 us) and is
+  inconsistent with the stable kernel Task Duration, so it is recorded as a
+  noisy rollback sample rather than evidence of a code change.
+
+### R10 — optimization point 30: pure-Vector flatten compile option (pending)
+
+- Unique change: pass `enable_flatten=True` only when launching the candidate;
+  the frozen baseline launch continues to use the compiler default.
+- IR basis: R3 is a pure-Vector kernel whose TTAdapter retains a dynamic
+  grid-stride `scf.for`.  The A5 compile-parameter guidance recommends flatten
+  lowering for pure-Vector workloads, while R9 proved multibuffer is a no-op.
+- Function/precision: kernel source, task ownership, int64 addressing, load
+  order, both FP32 reductions, two BF16 rounding boundaries, and three output
+  stores are unchanged.
+- Validation gate: require all 12 candidate correctness cases, then compare all
+  Event cases, forced M16384 msprof, and exact TTIR/TTAdapter/final-IR hashes.
+  Retain only a stable >=3% incremental gain over R3.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
