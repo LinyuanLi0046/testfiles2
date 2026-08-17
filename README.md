@@ -22,6 +22,8 @@ python bench_mmq_style_norm_after_attn_npu.py \
   --cases all \
   --scope kernel \
   --device npu:5 \
+  --event-diagnostic off \
+  --capture-msprof-op on \
   --output-csv mmq_style_norm_after_attn_all.csv
 ```
 
@@ -62,18 +64,33 @@ shape-by-shape compilation.
 The standard auto run writes these record types into one CSV:
 
 - `correctness`: per-output errors and pass/fail for baseline and candidate;
-- `performance`: alternating event samples, p20/p50/p80, speedup, and logical
-  bandwidth;
-- `msprof_op`: native device `Task Duration(us)` for representative decode and
-  all four prefill cases;
+- `performance`: authoritative native `msprof op` `Task Duration(us)` values,
+  p20/p50/p80, speedup, and logical bandwidth for baseline and candidate;
 - `msprof_op_artifact`: gzip+base64 raw msprof stdout plus emitted CSV/JSON/text
-  pipeline and timeline diagnostics (including `OpBasicInfo.csv`);
+  pipeline and timeline diagnostics (including `OpBasicInfo.csv`) for decode
+  M=1/32/64/128 and all four prefill cases;
 - `ir_artifact`: gzip+base64 TTIR, TTAdapter, and last-pass MLIR for M=8192.
 
-The msprof command always supplies the exact Triton symbol through
-`--kernel-name`; its device Task Duration is the authoritative value when event
-timing is below roughly 30 us. IR/msprof capture failures become diagnostic CSV
-rows and do not erase otherwise valid measurements.
+The standard run performs an isolated `msprof op` capture for every selected
+case and both providers: all decode M=1..128 and all four prefill M values for
+`--cases all`. Each command supplies the exact Triton symbol through
+`--kernel-name`. Consequently, every latency used for an optimization decision
+comes from device `Task Duration(us)`, including values below the roughly 30-us
+event floor. This exhaustive mode starts many short profiler processes and is
+expected to take substantially longer than event-only timing.
+
+Only the raw pipeline artifacts are sampled at the eight representative points
+listed above to keep Git/CSV size bounded. The parsed authoritative duration
+rows still cover every selected M.
+
+Repeated NPU-event averages are disabled by default. They can be added only as
+non-authoritative `record_type=event_diagnostic` rows with
+`--event-diagnostic on`; they must not be used to accept or reject an
+optimization. IR/msprof capture failures become diagnostic CSV rows and do not
+erase otherwise valid measurements in a manual inspection run. For the remote
+automatic loop, any missing selected msprof measurement makes the command fail;
+the auto worker therefore removes the partial CSV and publishes the independent
+error log instead of accepting incomplete latency data.
 
 An explicit `--capture-profile on` additionally captures candidate A5 memory
 and L2 profiler summaries for M=16384 as `profile_artifact` rows. Use

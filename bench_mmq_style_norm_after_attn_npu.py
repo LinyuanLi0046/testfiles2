@@ -51,7 +51,7 @@ AUTO_OUTPUT_CSV = "mmq_style_norm_after_attn_all.csv"
 IR_CAPTURE_SCRIPT = "capture_mmq_style_norm_after_attn_ir.sh"
 IR_CAPTURE_CASE = "prefill_m8192"
 PROFILE_CAPTURE_CASE = "prefill_m16384"
-MSPROF_OP_CASES = (
+MSPROF_ARTIFACT_CASES = {
     "decode_m1",
     "decode_m32",
     "decode_m64",
@@ -60,7 +60,7 @@ MSPROF_OP_CASES = (
     "prefill_m8192",
     "prefill_m9616",
     "prefill_m16384",
-)
+}
 MSPROF_OP_WARMUP = 10
 MSPROF_OP_LAUNCH_COUNT = 5
 
@@ -536,10 +536,12 @@ def run_performance(
                 {
                     **harness.metadata(),
                     **case_fields(case),
-                    "record_type": "performance",
+                    "record_type": "event_diagnostic",
                     "variant": provider,
                     "status": "MEASURED",
                     "scope": scope,
+                    "measurement_source": "npu_event_repeated_average",
+                    "authoritative_latency": False,
                     "warmup": warmup,
                     "rounds": rounds,
                     "inner_repeat": inner_repeat,
@@ -751,23 +753,25 @@ def capture_profile_records(harness: Harness) -> list[dict[str, object]]:
 
 
 def capture_msprof_op_records(
-    harness: Harness, device: str
-) -> list[dict[str, object]]:
-    """Capture device Task Duration(us); authoritative below the event floor."""
+    harness: Harness, device: str, cases: Sequence[Case]
+) -> tuple[list[dict[str, object]], int]:
+    """Capture authoritative device Task Duration(us) for every selected case."""
     script = Path(__file__).resolve()
-    cases_by_name = {case.name: case for case in ALL_CASES}
     artifacts: list[dict[str, object]] = []
     summaries: list[dict[str, object]] = []
-    for case_name in MSPROF_OP_CASES:
-        case = cases_by_name[case_name]
+    capture_failures = 0
+    for case in cases:
+        case_name = case.name
         for provider in PROVIDERS:
             kernel_name = f"_{provider}_mmq_style_norm_after_attn_kernel"
             common = {
                 **harness.metadata(),
                 **case_fields(case),
-                "record_type": "msprof_op",
+                "record_type": "performance",
                 "variant": provider,
-                "scope": "msprof_op_task_duration",
+                "scope": "kernel",
+                "measurement_source": "msprof_op_task_duration",
+                "authoritative_latency": True,
                 "kernel_name": kernel_name,
             }
             with tempfile.TemporaryDirectory(
@@ -810,12 +814,19 @@ def capture_msprof_op_records(
                         timeout=900,
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
+                    capture_failures += 1
+                    print(f"msprof op ERROR {case_name} {provider}: {exc!r}")
                     artifacts.append(
                         {**common, "status": "ERROR", "capture_log": repr(exc)}
                     )
                     continue
                 output = result.stdout or ""
                 if result.returncode != 0:
+                    capture_failures += 1
+                    print(
+                        f"msprof op ERROR {case_name} {provider}: "
+                        f"exit={result.returncode}\n{output[-4000:]}"
+                    )
                     artifacts.append(
                         {
                             **common,
@@ -825,29 +836,33 @@ def capture_msprof_op_records(
                         }
                     )
                     continue
-                stdout_path = output_dir / "msprof_stdout.log"
-                stdout_path.write_text(output, encoding="utf-8")
                 artifact_common = {**common, "record_type": "msprof_op_artifact"}
-                artifacts.append(artifact_record(artifact_common, stdout_path, output_dir))
                 csv_files = sorted(output_dir.rglob("*.csv"))
                 basic_files = [
                     path for path in csv_files if "opbasicinfo" in path.name.lower()
                 ]
-                # Preserve the pipeline/timeline diagnostics emitted by
-                # msprof-op, not only the basic-duration table.  Binary and
-                # oversized files are intentionally excluded from the CSV.
-                diagnostic_files = sorted(
-                    path
-                    for path in output_dir.rglob("*")
-                    if path.is_file()
-                    and path != stdout_path
-                    and path.suffix.lower() in {".csv", ".json", ".txt", ".log"}
-                    and path.stat().st_size <= 10_000_000
-                )
-                for path in diagnostic_files:
+                if case_name in MSPROF_ARTIFACT_CASES:
+                    stdout_path = output_dir / "msprof_stdout.log"
+                    stdout_path.write_text(output, encoding="utf-8")
                     artifacts.append(
-                        artifact_record(artifact_common, path, output_dir)
+                        artifact_record(artifact_common, stdout_path, output_dir)
                     )
+                    # Keep full pipeline/timeline diagnostics for representative
+                    # points. Summaries still cover every selected M, while this
+                    # cap prevents the all-decode CSV from growing without bound.
+                    diagnostic_files = sorted(
+                        path
+                        for path in output_dir.rglob("*")
+                        if path.is_file()
+                        and path != stdout_path
+                        and path.suffix.lower()
+                        in {".csv", ".json", ".txt", ".log"}
+                        and path.stat().st_size <= 10_000_000
+                    )
+                    for path in diagnostic_files:
+                        artifacts.append(
+                            artifact_record(artifact_common, path, output_dir)
+                        )
                 durations: list[float] = []
                 discovered_names: list[str] = []
                 for path in basic_files:
@@ -882,6 +897,11 @@ def capture_msprof_op_records(
                                         pass
                                 break
                 if not durations:
+                    capture_failures += 1
+                    print(
+                        f"msprof op ERROR {case_name} {provider}: target "
+                        f"kernel {kernel_name!r} has no Task Duration(us)"
+                    )
                     artifacts.append(
                         {
                             **common,
@@ -893,12 +913,22 @@ def capture_msprof_op_records(
                         }
                     )
                     continue
+                logical_bytes = case.rows * HIDDEN_DIM * (2 + 4 + 2 + 4 + 4)
+                p50_us = statistics.median(durations)
                 summary = {
                     **common,
                     "status": "MEASURED",
+                    "warmup": MSPROF_OP_WARMUP,
+                    "rounds": MSPROF_OP_LAUNCH_COUNT,
+                    "p20_us": percentile(durations, 0.20),
+                    "p50_us": p50_us,
+                    "p80_us": percentile(durations, 0.80),
+                    "mean_us": statistics.fmean(durations),
+                    "logical_bytes": logical_bytes,
+                    "logical_bandwidth_GBps": logical_bytes / p50_us / 1.0e3,
                     "msprof_sample_count": len(durations),
                     "msprof_task_min_us": min(durations),
-                    "msprof_task_p50_us": statistics.median(durations),
+                    "msprof_task_p50_us": p50_us,
                     "msprof_task_mean_us": statistics.fmean(durations),
                     "msprof_task_max_us": max(durations),
                     "msprof_op_names": "|".join(sorted(set(discovered_names))),
@@ -918,8 +948,14 @@ def capture_msprof_op_records(
         baseline = medians.get((str(record["case"]), "baseline"))
         candidate = medians.get((str(record["case"]), "candidate"))
         if baseline and candidate:
-            record["msprof_speedup_vs_baseline"] = baseline / candidate
-    return summaries + artifacts
+            speedup = (
+                1.0
+                if str(record["variant"]) == "baseline"
+                else baseline / candidate
+            )
+            record["speedup_vs_baseline"] = speedup
+            record["msprof_speedup_vs_baseline"] = speedup
+    return summaries + artifacts, capture_failures
 
 
 def write_csv(path_text: str, records: Sequence[dict[str, object]]) -> None:
@@ -982,6 +1018,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="on captures candidate A5 memory/L2 profiler summaries",
     )
     parser.add_argument(
+        "--event-diagnostic",
+        choices=("on", "off"),
+        default="off",
+        help=(
+            "optionally record repeated NPU-event averages as non-authoritative "
+            "diagnostics; official latency always comes from msprof op"
+        ),
+    )
+    parser.add_argument(
         "--capture-msprof-op",
         choices=("auto", "on", "off"),
         default="auto",
@@ -1018,6 +1063,7 @@ def main() -> int:
 
     records: list[dict[str, object]] = []
     failures = 0
+    measurement_failures = 0
     if args.mode in ("both", "correctness"):
         correctness_records, failures = run_correctness(harness, cases)
         records.extend(correctness_records)
@@ -1027,7 +1073,7 @@ def main() -> int:
         )
     if failures:
         print("Performance and captures skipped because correctness failed.")
-    elif args.mode in ("both", "performance"):
+    elif args.mode in ("both", "performance") and args.event_diagnostic == "on":
         records.extend(
             run_performance(
                 harness,
@@ -1051,16 +1097,27 @@ def main() -> int:
         args.capture_profile == "auto" and standard_run
     )
     capture_msprof = args.capture_msprof_op == "on" or (
-        args.capture_msprof_op == "auto" and standard_run
+        args.capture_msprof_op == "auto"
+        and args.mode in ("both", "performance")
     )
     if failures == 0 and capture_ir:
         records.extend(capture_ir_records(harness, str(device)))
     if failures == 0 and capture_profile:
         records.extend(capture_profile_records(harness))
     if failures == 0 and capture_msprof:
-        records.extend(capture_msprof_op_records(harness, str(device)))
+        msprof_records, measurement_failures = capture_msprof_op_records(
+            harness, str(device), cases
+        )
+        records.extend(msprof_records)
+        if measurement_failures:
+            print(
+                f"\nmsprof-op summary: FAIL, "
+                f"missing authoritative measurements={measurement_failures}"
+            )
+        else:
+            print("\nmsprof-op summary: PASS, all selected cases measured")
     write_csv(args.output_csv, records)
-    return 1 if failures else 0
+    return 1 if failures or measurement_failures else 0
 
 
 if __name__ == "__main__":

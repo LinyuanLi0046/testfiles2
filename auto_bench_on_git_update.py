@@ -130,6 +130,10 @@ def benchmark_command(device: str) -> list[str]:
         "kernel",
         "--device",
         device,
+        "--event-diagnostic",
+        "off",
+        "--capture-msprof-op",
+        "on",
         "--output-csv",
         OUTPUT_CSV,
     ]
