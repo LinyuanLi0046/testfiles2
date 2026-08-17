@@ -339,7 +339,49 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 6`
 - `ir_has_more_suggestions: false`
 
-### R4 rollback confirmation (awaiting remote result)
+### R4 rollback confirmation (`8952e84`)
 
 - Candidate residual/output address casts are restored to production int64;
   candidate is again identical to frozen R0 before point 7.
+- Correctness: all 26 records PASS.
+- M16384 Event is 427.044 us candidate versus 426.951 us baseline
+  (0.9986x). Same-source msprof is 378.109 versus 381.487 us (1.0089x),
+  another sub-1% provider-order fluctuation with identical source and IR.
+- Decision: rollback confirmed; proceed from the frozen source.
+
+### Ordered checks after R4
+
+- Point 7, pass elimination/merge: not hit. Each row loads hidden/residual once
+  and computes only one RMS statistic; there are no duplicate data passes or
+  block loops to merge.
+- Point 8, dimension merge: not hit. The kernel has one row loop plus one
+  vector reduction axis, not three or more independent continuous nested
+  dimensions.
+- Point 9, libdevice: not hit. RMS reciprocal square root already uses
+  `tl.math.rsqrt`; there is no hand-written math function.
+- Point 10, loop-invariant hoisting: not hit. Gamma, column offsets, mask, and
+  output dtype are already outside the row loop.
+- Point 11, load ordering: not hit. Hidden and residual are independent and
+  already issued consecutively at the start of each row before their first use.
+
+### R5 — optimization point 12: loop-free small-grid path (awaiting remote result)
+
+- Hit condition: one generic grid-stride kernel covers decode M=1..128 and
+  prefill M=4096..16384. For M no larger than the 56 physical vector cores,
+  each program maps to exactly one row but still carries the generic
+  `tl.range` loop and step/control machinery.
+- Unique change: candidate dispatch selects a second, loop-free kernel only
+  when `rows <= num_vector_cores`. It maps `row_id = tl.program_id(0)`.
+  Baseline, candidate M=64/128, and all prefill shapes retain the original
+  grid-stride kernel unchanged.
+- Threshold: `total_blocks == rows`, so `rows <= num_vector_cores` follows the
+  skill's small-grid boundary exactly. The core count remains queried from the
+  active device and is not hard-coded.
+- Function and precision: every launched program still owns one unique row.
+  Address construction, loads, FP32 residual addition/reduction, BF16
+  gamma-input round, output conversions, and all three stores are copied
+  exactly from the generic candidate body.
+- Expected benefit: remove the general row loop's compare, step, and backedge
+  from decode M=1/2/4/8/16/32 without changing large-grid code generation.
+- `hit_optimization_point: 12`
+- `ir_has_more_suggestions: false`

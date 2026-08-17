@@ -246,6 +246,68 @@ def _candidate_rms_norm_kernel(
         tl.store(out_ptr + output_offs, out, mask=mask)
 
 
+@triton.jit(
+    do_not_specialize=[
+        "rows",
+        "hidden_states_num_kv",
+        "hidden_states_kv_stride",
+    ]
+)
+def _candidate_rms_norm_small_grid_kernel(
+    hidden_states_ptr: tl.tensor,
+    reisdual_ptr: tl.tensor,
+    gamma_ptr: tl.tensor,
+    out_ptr: tl.tensor,
+    out_residual_ptr: tl.tensor,
+    out_copy_ptr: tl.tensor,
+    rows: int,
+    cols: tl.constexpr,
+    eps: float,
+    hidden_states_row_stride: int,
+    hidden_states_num_kv: int,
+    hidden_states_kv_stride: int,
+    residual_row_stride: int,
+    residual_after_layernorm: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_id = tl.program_id(0)
+    cols_off = tl.arange(0, BLOCK_SIZE)
+    mask = cols_off < cols
+    gamma_shm = tl.load(gamma_ptr + cols_off, mask=mask, other=0.0)
+    output_dtype = out_ptr.dtype.element_ty
+
+    kv_idx = row_id // hidden_states_num_kv
+    row_idx = row_id % hidden_states_num_kv
+    kv_off = kv_idx * hidden_states_kv_stride
+    h_offs = row_idx * hidden_states_row_stride + kv_off + cols_off
+    r_offs = (row_id * residual_row_stride + cols_off).to(tl.int64)
+    h = tl.load(hidden_states_ptr + h_offs, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    if reisdual_ptr is not None:
+        r = tl.load(reisdual_ptr + r_offs, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        h = h + r
+
+    output_offs = (row_id * cols + cols_off).to(tl.int64)
+    if not residual_after_layernorm and out_residual_ptr is not None:
+        tl.store(
+            out_residual_ptr + output_offs,
+            h.to(reisdual_ptr.dtype.element_ty),
+            mask=mask,
+        )
+
+    out = _candidate_do_rms_norm(h, gamma_shm, cols, eps)
+    if out_copy_ptr is not None:
+        tl.store(out_copy_ptr + output_offs, out, mask=mask)
+
+    out = out.to(output_dtype)
+    if residual_after_layernorm:
+        tl.store(out_residual_ptr + output_offs, out, mask=mask)
+    tl.store(out_ptr + output_offs, out, mask=mask)
+
+
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_rms_norm_kernel,
@@ -336,6 +398,8 @@ class Harness:
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
         num_programs = min(rows, self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE)
         kernel = PROVIDERS[provider]
+        if provider == "candidate" and rows <= self.num_vector_cores:
+            kernel = _candidate_rms_norm_small_grid_kernel
 
         def launch() -> object:
             return kernel[(num_programs,)](
