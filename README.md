@@ -22,8 +22,8 @@ python bench_mmq_style_norm_after_attn_npu.py \
   --cases all \
   --scope kernel \
   --device npu:5 \
-  --event-diagnostic off \
-  --capture-msprof-op on \
+  --event-timing on \
+  --capture-msprof-op auto \
   --output-csv mmq_style_norm_after_attn_all.csv
 ```
 
@@ -64,38 +64,45 @@ shape-by-shape compilation.
 The standard auto run writes these record types into one CSV:
 
 - `correctness`: per-output errors and pass/fail for baseline and candidate;
-- `performance`: authoritative native `msprof op` `Task Duration(us)` values,
-  p20/p50/p80, speedup, and logical bandwidth for baseline and candidate;
+- `performance`: accepted repeated-event values for cases at or above 30 us,
+  or native `msprof op` `Task Duration(us)` for cases below 30 us;
+- `event_diagnostic`: the preliminary event values superseded by msprof;
 - `msprof_op_artifact`: gzip+base64 raw msprof stdout plus emitted CSV/JSON/text
-  pipeline and timeline diagnostics (including `OpBasicInfo.csv`) for decode
-  M=1/32/64/128 and all four prefill cases;
+  pipeline and timeline diagnostics when a diagnostic capture is requested;
 - `ir_artifact`: gzip+base64 TTIR, TTAdapter, and last-pass MLIR for M=8192.
 
-The standard run performs an isolated `msprof op` capture for every selected
-case and both providers: all decode M=1..128 and all four prefill M values for
-`--cases all`. Each command supplies the exact Triton symbol through
-`--kernel-name`. Consequently, every latency used for an optimization decision
-comes from device `Task Duration(us)`, including values below the roughly 30-us
-event floor. This exhaustive mode starts many short profiler processes and is
-expected to take substantially longer than event-only timing.
+The standard run first measures every selected case with alternating repeated
+NPU Events. If either provider's p50 is below 30 us, those event rows are marked
+non-authoritative and an isolated `msprof op` run is performed for both
+providers using their exact `--kernel-name`. The resulting device
+`Task Duration(us)` rows become the official measurements. Cases at or above
+30 us retain the faster repeated-event result, avoiding hundreds of profiler
+processes for large shapes.
 
-Only the raw pipeline artifacts are sampled at the eight representative points
-listed above to keep Git/CSV size bounded. The parsed authoritative duration
-rows still cover every selected M.
+To request exact device time or pipeline files regardless of the preliminary
+latency, force msprof for only the cases being inspected:
 
-Repeated NPU-event averages are disabled by default. They can be added only as
-non-authoritative `record_type=event_diagnostic` rows with
-`--event-diagnostic on`; they must not be used to accept or reject an
-optimization. IR/msprof capture failures become diagnostic CSV rows and do not
-erase otherwise valid measurements in a manual inspection run. For the remote
-automatic loop, any missing selected msprof measurement makes the command fail;
-the auto worker therefore removes the partial CSV and publishes the independent
-error log instead of accepting incomplete latency data.
+```bash
+python bench_mmq_style_norm_after_attn_npu.py \
+  --mode performance \
+  --cases prefill_m16384 \
+  --device npu:5 \
+  --capture-msprof-op on \
+  --output-csv mmq_style_norm_after_attn_m16384_msprof.csv
+```
+
+With `--capture-msprof-op auto`, raw artifacts are retained only for selected
+representative probe names to keep Git/CSV size bounded. With
+`--capture-msprof-op on`, raw pipeline/timeline files are retained for every
+explicitly selected case. Any required msprof measurement that fails or cannot
+find `Task Duration(us)` makes the command fail; the auto worker removes the
+partial CSV and publishes the independent error log.
 
 An explicit `--capture-profile on` additionally captures candidate A5 memory
 and L2 profiler summaries for M=16384 as `profile_artifact` rows. Use
-`--capture-ir off` or `--capture-msprof-op off` for a manual run that does not
-need those diagnostics.
+`--capture-ir off` for a manual run that does not need compiler diagnostics.
+`--capture-msprof-op off` is valid only when all selected event timings are at
+least 30 us; sub-30-us cases are rejected without an msprof measurement.
 
 ## Optimization boundary
 

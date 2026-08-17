@@ -46,6 +46,7 @@ OUTPUT_ATOL = 2.0e-2
 OUTPUT_RTOL = 2.0e-2
 FP32_ATOL = 3.0e-2
 FP32_RTOL = 2.0e-2
+MSPROF_REQUIRED_BELOW_US = 30.0
 
 AUTO_OUTPUT_CSV = "mmq_style_norm_after_attn_all.csv"
 IR_CAPTURE_SCRIPT = "capture_mmq_style_norm_after_attn_ir.sh"
@@ -479,8 +480,10 @@ def run_performance(
     warmup: int,
     rounds: int,
     inner_repeat_override: int,
-) -> list[dict[str, object]]:
+    force_msprof_all: bool,
+) -> tuple[list[dict[str, object]], list[Case]]:
     records: list[dict[str, object]] = []
+    msprof_cases: list[Case] = []
     print(
         f"\nPerformance: scope={scope}, warmup={warmup}, rounds={rounds}, "
         f"physical_AIV={harness.num_vector_cores}"
@@ -520,8 +523,17 @@ def run_performance(
                 "mean_us": statistics.fmean(values),
             }
         baseline_p50 = stats["baseline"]["p50_us"]
+        requires_msprof = force_msprof_all or min(
+            current["p50_us"] for current in stats.values()
+        ) < MSPROF_REQUIRED_BELOW_US
+        if requires_msprof:
+            msprof_cases.append(case)
         logical_bytes = case.rows * HIDDEN_DIM * (2 + 4 + 2 + 4 + 4)
-        print(f"\n  {case.name}: M={case.rows}, inner_repeat={inner_repeat}")
+        timing_policy = "msprof-required" if requires_msprof else "event-accepted"
+        print(
+            f"\n  {case.name}: M={case.rows}, inner_repeat={inner_repeat}, "
+            f"policy={timing_policy}"
+        )
         print("    variant      p20(us)   p50(us)   p80(us)   speedup/R0")
         for provider in PROVIDERS:
             current = stats[provider]
@@ -536,12 +548,16 @@ def run_performance(
                 {
                     **harness.metadata(),
                     **case_fields(case),
-                    "record_type": "event_diagnostic",
+                    "record_type": (
+                        "event_diagnostic" if requires_msprof else "performance"
+                    ),
                     "variant": provider,
                     "status": "MEASURED",
                     "scope": scope,
                     "measurement_source": "npu_event_repeated_average",
-                    "authoritative_latency": False,
+                    "authoritative_latency": not requires_msprof,
+                    "requires_msprof_op": requires_msprof,
+                    "msprof_threshold_us": MSPROF_REQUIRED_BELOW_US,
                     "warmup": warmup,
                     "rounds": rounds,
                     "inner_repeat": inner_repeat,
@@ -552,7 +568,7 @@ def run_performance(
                 }
             )
         del launches, hidden_states, residual
-    return records
+    return records, msprof_cases
 
 
 def parse_cases(spec: str) -> list[Case]:
@@ -753,7 +769,11 @@ def capture_profile_records(harness: Harness) -> list[dict[str, object]]:
 
 
 def capture_msprof_op_records(
-    harness: Harness, device: str, cases: Sequence[Case]
+    harness: Harness,
+    device: str,
+    cases: Sequence[Case],
+    *,
+    capture_all_artifacts: bool,
 ) -> tuple[list[dict[str, object]], int]:
     """Capture authoritative device Task Duration(us) for every selected case."""
     script = Path(__file__).resolve()
@@ -841,7 +861,7 @@ def capture_msprof_op_records(
                 basic_files = [
                     path for path in csv_files if "opbasicinfo" in path.name.lower()
                 ]
-                if case_name in MSPROF_ARTIFACT_CASES:
+                if capture_all_artifacts or case_name in MSPROF_ARTIFACT_CASES:
                     stdout_path = output_dir / "msprof_stdout.log"
                     stdout_path.write_text(output, encoding="utf-8")
                     artifacts.append(
@@ -1018,19 +1038,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="on captures candidate A5 memory/L2 profiler summaries",
     )
     parser.add_argument(
+        "--event-timing",
         "--event-diagnostic",
+        dest="event_timing",
         choices=("on", "off"),
-        default="off",
+        default="on",
         help=(
-            "optionally record repeated NPU-event averages as non-authoritative "
-            "diagnostics; official latency always comes from msprof op"
+            "measure all selected cases with repeated NPU events first; values "
+            "at or above 30 us are accepted, smaller values trigger msprof op"
         ),
     )
     parser.add_argument(
         "--capture-msprof-op",
         choices=("auto", "on", "off"),
         default="auto",
-        help=f"auto enables native msprof-op for the standard {AUTO_OUTPUT_CSV} run",
+        help=(
+            "auto profiles only event timings below 30 us; on forces msprof-op "
+            "and raw pipeline artifacts for every selected case"
+        ),
     )
     parser.add_argument("--output-csv", default="")
     return parser
@@ -1064,6 +1089,7 @@ def main() -> int:
     records: list[dict[str, object]] = []
     failures = 0
     measurement_failures = 0
+    auto_msprof_cases: list[Case] = []
     if args.mode in ("both", "correctness"):
         correctness_records, failures = run_correctness(harness, cases)
         records.extend(correctness_records)
@@ -1073,17 +1099,23 @@ def main() -> int:
         )
     if failures:
         print("Performance and captures skipped because correctness failed.")
-    elif args.mode in ("both", "performance") and args.event_diagnostic == "on":
-        records.extend(
-            run_performance(
+    elif args.mode in ("both", "performance"):
+        if args.event_timing == "off" and args.capture_msprof_op == "auto":
+            raise ValueError(
+                "--capture-msprof-op auto requires --event-timing on; use "
+                "--capture-msprof-op on to force accurate timing directly"
+            )
+        if args.event_timing == "on":
+            event_records, auto_msprof_cases = run_performance(
                 harness,
                 cases,
                 scope=args.scope,
                 warmup=args.warmup,
                 rounds=args.rounds,
                 inner_repeat_override=args.inner_repeat,
+                force_msprof_all=args.capture_msprof_op == "on",
             )
-        )
+            records.extend(event_records)
 
     standard_run = (
         Path(args.output_csv).name == AUTO_OUTPUT_CSV
@@ -1096,17 +1128,28 @@ def main() -> int:
     capture_profile = args.capture_profile == "on" or (
         args.capture_profile == "auto" and standard_run
     )
-    capture_msprof = args.capture_msprof_op == "on" or (
-        args.capture_msprof_op == "auto"
-        and args.mode in ("both", "performance")
-    )
+    if args.capture_msprof_op == "on":
+        msprof_cases = list(cases)
+    elif args.capture_msprof_op == "auto":
+        msprof_cases = auto_msprof_cases
+    else:
+        msprof_cases = []
+        if auto_msprof_cases:
+            measurement_failures = len(auto_msprof_cases)
+            print(
+                "\nERROR: event timing below 30 us requires msprof op, but "
+                "--capture-msprof-op off was selected"
+            )
     if failures == 0 and capture_ir:
         records.extend(capture_ir_records(harness, str(device)))
     if failures == 0 and capture_profile:
         records.extend(capture_profile_records(harness))
-    if failures == 0 and capture_msprof:
+    if failures == 0 and msprof_cases:
         msprof_records, measurement_failures = capture_msprof_op_records(
-            harness, str(device), cases
+            harness,
+            str(device),
+            msprof_cases,
+            capture_all_artifacts=args.capture_msprof_op == "on",
         )
         records.extend(msprof_records)
         if measurement_failures:
@@ -1115,7 +1158,10 @@ def main() -> int:
                 f"missing authoritative measurements={measurement_failures}"
             )
         else:
-            print("\nmsprof-op summary: PASS, all selected cases measured")
+            print(
+                f"\nmsprof-op summary: PASS, "
+                f"requested cases measured={len(msprof_cases)}"
+            )
     write_csv(args.output_csv, records)
     return 1 if failures or measurement_failures else 0
 

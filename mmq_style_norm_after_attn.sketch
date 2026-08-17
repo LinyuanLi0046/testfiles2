@@ -62,12 +62,13 @@ because BLOCK_SIZE is exactly 2048.
 
 - Correctness checks all three outputs against a torch reference that preserves
   both BF16 rounding boundaries.
-- Every official performance row comes from native
-  `msprof op --kernel-name=...` Task Duration(us), for every selected M and both
-  providers. This includes all 132 cases in the standard run.
-- Repeated event timing is disabled by default. If explicitly enabled, its rows
-  are marked `event_diagnostic` and non-authoritative because small kernels may
-  hit the roughly 30-us submission floor.
+- Every case is first measured with alternating repeated NPU Events. Event p50
+  at or above 30 us is accepted as the efficient first-pass result.
+- If either provider is below 30 us, both event rows become
+  `event_diagnostic`; native `msprof op --kernel-name=...` Task Duration(us)
+  replaces them as the official performance result.
+- `--capture-msprof-op on` bypasses the threshold and forces exact time plus raw
+  pipeline/timeline artifacts for every explicitly selected case.
 - IR capture stores TTIR, TTAdapter, and final BishengIR MLIR as gzip+base64 CSV
   artifact records for `prefill_m8192`.
 - Optional torch-npu profiling stores memory/L2 summaries for `prefill_m16384`.
