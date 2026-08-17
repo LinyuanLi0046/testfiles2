@@ -1,1 +1,90 @@
+# WeLM mmq_style_norm_after_attn NPU optimization workspace
 
+This repository is a self-contained benchmark and remote execution loop for
+`mmq_style_norm_after_attn` on Ascend A5 (950). It does not import the
+NEWSGLANG checkout on the remote worker.
+
+## Remote worker
+
+From the NPU Python environment in the `testfiles2` repository root, run:
+
+```bash
+python auto_bench_on_git_update.py --run-now --device npu:5
+```
+
+The process benchmarks the synchronized current HEAD once, then fetches
+`origin/<current-branch>` every 60 seconds. On each source update it
+fast-forwards and runs:
+
+```bash
+python bench_mmq_style_norm_after_attn_npu.py \
+  --mode both \
+  --cases all \
+  --scope kernel \
+  --device npu:5 \
+  --output-csv mmq_style_norm_after_attn_all.csv
+```
+
+No fetch/pull occurs while the benchmark is running or while an error file is
+being written. On success, an old
+`mmq_style_norm_after_attn_run_error.log` is removed, the CSV is committed, and
+the result is pushed to origin. On failure, a stale CSV is removed, combined
+stdout/stderr is written to that error log, and the error is committed and
+pushed. Push races are detected; a result produced from a stale source commit
+is discarded and rerun on the newest commit.
+
+Use `BENCH_PYTHON=/path/to/python` if the environment's interpreter is not the
+default `python`. `--interval SECONDS` changes the poll interval.
+`--once --run-now` runs/publishes exactly one current-HEAD result.
+
+## Production-faithful tensor contract
+
+The benchmark follows the actual WeLM NPU PPLN post-attention path:
+
+- hidden states: contiguous `[M, 2048]` BF16 output from attention o_proj;
+- residual: contiguous `[M, 2048]` FP32 third output from the preceding norm;
+- both RMSNorm weights: contiguous `[2048]` BF16 model parameters;
+- outputs, in production order: BF16 output, FP32 residual, FP32 normalized copy;
+- epsilon: `1e-5`.
+
+The reference deliberately reproduces both production BF16 rounding points,
+including the cast after O-Norm and the cast to r-norm gamma dtype before the
+second FP32 reduction. This prevents the standalone test from silently using a
+numerically different path than the model.
+
+Coverage is every decode concurrency `M=1..128` plus prefill
+`M=4096,8192,9616,16384`, always with hidden_dim 2048. M stays a runtime value
+(`do_not_specialize`) so changing token count/batch concurrency does not cause
+shape-by-shape compilation.
+
+## CSV diagnostics
+
+The standard auto run writes these record types into one CSV:
+
+- `correctness`: per-output errors and pass/fail for baseline and candidate;
+- `performance`: alternating event samples, p20/p50/p80, speedup, and logical
+  bandwidth;
+- `msprof_op`: native device `Task Duration(us)` for representative decode and
+  all four prefill cases;
+- `msprof_op_artifact`: gzip+base64 raw msprof stdout plus emitted CSV/JSON/text
+  pipeline and timeline diagnostics (including `OpBasicInfo.csv`);
+- `ir_artifact`: gzip+base64 TTIR, TTAdapter, and last-pass MLIR for M=8192.
+
+The msprof command always supplies the exact Triton symbol through
+`--kernel-name`; its device Task Duration is the authoritative value when event
+timing is below roughly 30 us. IR/msprof capture failures become diagnostic CSV
+rows and do not erase otherwise valid measurements.
+
+An explicit `--capture-profile on` additionally captures candidate A5 memory
+and L2 profiler summaries for M=16384 as `profile_artifact` rows. Use
+`--capture-ir off` or `--capture-msprof-op off` for a manual run that does not
+need those diagnostics.
+
+## Optimization boundary
+
+The benchmark contains two independent Triton implementations. `baseline` is a
+frozen copy of the current NEWSGLANG kernel; only the clearly marked
+`candidate` section should change. At initialization they are identical so the
+first remote result is a noise/R0 measurement. See
+`mmq_style_norm_after_attn.sketch` for the verified call context and ordered
+optimization backlog.

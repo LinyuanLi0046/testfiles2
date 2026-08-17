@@ -1,0 +1,85 @@
+# mmq_style_norm_after_attn — Ascend A5 optimization sketch
+
+## 1. Production contract (must not drift)
+
+Call path:
+
+`WeLMv4DecoderLayer.forward` -> attention `o_proj` -> optional DP all-reduce ->
+`mmq_style_norm_after_attn` in `sglang/srt/layers/welmv4_op.py`.
+
+Fixed shape/dtypes for this workspace:
+
+- `hidden_states`: `[M, 2048]`, contiguous BF16. This is the o_proj result.
+- `residual`: `[M, 2048]`, contiguous FP32. In PPLN mode this is the third
+  FP32 result returned by the preceding input norm, not the BF16 residual copy.
+- `onorm_weight`: `[2048]`, contiguous BF16 model parameter.
+- `rnorm_weight`: `[2048]`, contiguous BF16 model parameter.
+- `eps`: runtime float, normally `1e-5`.
+- returns `(output BF16, residual_out FP32, fp32_out FP32)`.
+- M is dynamic: decode M=1..128; prefill M=4096/8192/9616/16384. M and
+  values derived from M must not become constexpr.
+
+Exact arithmetic/rounding order:
+
+1. BF16 hidden -> FP32 RMS reduction -> multiply BF16 o-norm gamma.
+2. O-norm result -> BF16 (mandatory model rounding boundary).
+3. Add FP32 residual; store this FP32 sum to `residual_out`.
+4. Sum -> BF16 because `_do_mmq_rms_norm` casts to gamma dtype, then FP32.
+5. FP32 RMS reduction -> multiply BF16 r-norm gamma.
+6. Store FP32 result to `fp32_out`, and BF16 cast to `output`.
+
+## 2. Operator classification and architecture
+
+This is two dependent row-wise RMS reductions fused with one residual add and
+three stores.  `hidden_dim=2048` is one complete power-of-two row tile.  A
+program walks rows in a grid-stride loop; all reductions stay local to that
+program.  A single fused kernel is the baseline architecture because splitting
+the two reductions would materialize another full tensor, add a launch, and
+lose the O-norm/residual producer-consumer locality.
+
+Current host grid matches production:
+
+`num_programs = min(M, physical_vector_cores * 8)`
+
+The baseline and initial candidate use `num_stages=2` on the dynamic row loop.
+The candidate is intentionally identical at workspace initialization, so R0
+must measure approximately 1.0x and establishes benchmark noise.
+
+## 3. Memory and precision budget
+
+Per row, excluding gamma cache reuse:
+
+- input reads: hidden 4 KiB + residual 8 KiB
+- output writes: output 4 KiB + residual_out 8 KiB + fp32_out 8 KiB
+- logical traffic: 32 KiB/row
+- two BF16 gamma vectors add 8 KiB per program before cache effects
+
+Both sum-of-squares reductions accumulate in FP32.  No atomic operation or
+cross-program reduction is needed.  No mask overhead exists at hidden_dim 2048
+because BLOCK_SIZE is exactly 2048.
+
+## 4. Measurement contract
+
+- Correctness checks all three outputs against a torch reference that preserves
+  both BF16 rounding boundaries.
+- Event timing uses repeated launches and alternating baseline/candidate order.
+- For small kernels, event measurements may hit the roughly 30-us submission
+  floor. Native `msprof op --kernel-name=...` Task Duration(us) is authoritative.
+- IR capture stores TTIR, TTAdapter, and final BishengIR MLIR as gzip+base64 CSV
+  artifact records for `prefill_m8192`.
+- Optional torch-npu profiling stores memory/L2 summaries for `prefill_m16384`.
+
+## 5. Ordered optimization backlog
+
+Follow `triton-latency-optimizer`: one change per pushed round, preserve the
+frozen baseline, validate correctness first, then compare all target cases.
+
+1. Establish R0 and inspect last-pass IR for spill/copy/scalarized reduction.
+2. Change only grid size/programs-per-core; compare decode and all prefill M.
+3. Change only row-loop `num_stages`; verify UB use and large-M latency.
+4. Change only row assignment/chunk size if IR shows loop/control overhead.
+5. Revisit data-movement/recomputation only when IR identifies redundant UB
+   copies; preserve the two BF16 rounding boundaries and all three stores.
+
+Reject any candidate with a correctness failure.  Do not retain sub-3% wins
+unless they unlock a larger subsequent change.  Never specialize on M.
