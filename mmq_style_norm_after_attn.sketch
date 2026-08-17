@@ -315,7 +315,7 @@ frozen baseline, validate correctness first, then compare all target cases.
 - M16384 returns to the R3 range: Event 478.49 us (1.1970x) and msprof
   Task Duration 436.12 us (1.2237x).
 
-### R8 — optimization point 30: early residual_out MTE3 store (pending)
+### R8 — optimization point 30: early residual_out MTE3 store (rejected)
 
 - Unique change: move only candidate's FP32 `residual_out` store immediately
   after `hs += residual`, before the second RMS reduction.
@@ -328,6 +328,14 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Expected impact: start the first MTE3 write as soon as its value is ready and
   overlap it with the second RMS vector reduction, without extra GM traffic or
   UB allocation.
+- Correctness: all 12 candidate cases PASS; errors match the frozen baseline.
+- Performance: M16384 msprof candidate regresses from the R3 rollback value
+  436.12 to 439.61 us (about -0.8%); Event is unchanged within noise.
+- Actual IR/profile impact: the store moves before the second RMS, but shared-UB
+  consumer synchronization grows from 15/15 to 16/16 SET/WAIT.  Mean MTE3 time
+  rises 17.1% and MTE3 wait rises 60.1%.
+- Decision: rejected and fully reverted.  A5 cannot overlap the two consumers
+  of the same `hs` UB buffer cheaply in this lowering.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
