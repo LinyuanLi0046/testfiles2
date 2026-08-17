@@ -306,7 +306,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Decision: rollback confirmed; both measurements are inside the established
   noise band.
 
-### R4 — optimization point 6: int32 linear output addresses (awaiting remote result)
+### R4 — optimization point 6: int32 linear output addresses (`f70c328`, rejected)
 
 - Hit condition: R0 explicitly casts the residual and dense output linear
   offsets to int64, which can introduce avoidable scalar/address lowering on
@@ -322,5 +322,24 @@ revisit point 18 if the multi-case performance threshold requires it.
   byte-for-byte unchanged.
 - Expected IR effect: keep the two dense linear address calculations in the
   vector-friendly int32 domain and avoid unnecessary int64 materialization.
+- Correctness: all 26 records PASS with unchanged output error bounds.
+- IR result: no effective code-generation change. R4 and R0 final-pass MLIR
+  are byte-for-byte identical at 44,114 bytes; counts of `i64`, `sext`,
+  `llvm.sdiv`, and `llvm.srem` are also identical. The compiler canonicalizes
+  the explicit source casts back to the same address path.
+- Prefill Event speedups for M=4096/8192/9616/16361/16384 are
+  0.9950x/1.0016x/0.9988x/0.9984x/1.0003x. Decode stays within +/-0.5%.
+- M16384 msprof is 376.851 us candidate versus 378.050 us baseline
+  (1.0032x), only +0.32%.
+- Profiler mean per AIV changes total 367.28 -> 368.75 us, MTE2
+  270.37 -> 271.85 us, MTE3 141.66 -> 141.97 us, and Scalar
+  48.107 -> 48.095 us. There is no pipeline-level benefit.
+- Decision: rejected and reverted. The source edit has no IR effect and all
+  latency differences are within the established noise band.
 - `hit_optimization_point: 6`
 - `ir_has_more_suggestions: false`
+
+### R4 rollback confirmation (awaiting remote result)
+
+- Candidate residual/output address casts are restored to production int64;
+  candidate is again identical to frozen R0 before point 7.

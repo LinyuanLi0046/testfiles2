@@ -218,7 +218,7 @@ def _candidate_rms_norm_kernel(
         row_idx = row_id % hidden_states_num_kv
         kv_off = kv_idx * hidden_states_kv_stride
         h_offs = row_idx * hidden_states_row_stride + kv_off + cols_off
-        r_offs = (row_id * residual_row_stride + cols_off).to(tl.int32)
+        r_offs = (row_id * residual_row_stride + cols_off).to(tl.int64)
         h = tl.load(hidden_states_ptr + h_offs, mask=mask, other=0.0).to(
             tl.float32
         )
@@ -228,7 +228,7 @@ def _candidate_rms_norm_kernel(
             )
             h = h + r
 
-        output_offs = (row_id * cols + cols_off).to(tl.int32)
+        output_offs = (row_id * cols + cols_off).to(tl.int64)
         if not residual_after_layernorm and out_residual_ptr is not None:
             tl.store(
                 out_residual_ptr + output_offs,
