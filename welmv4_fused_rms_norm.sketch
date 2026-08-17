@@ -364,7 +364,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Point 11, load ordering: not hit. Hidden and residual are independent and
   already issued consecutively at the start of each row before their first use.
 
-### R5 — optimization point 12: loop-free small-grid path (awaiting remote result)
+### R5 — optimization point 12: loop-free small-grid path (`01e088b`, rejected)
 
 - Hit condition: one generic grid-stride kernel covers decode M=1..128 and
   prefill M=4096..16384. For M no larger than the 56 physical vector cores,
@@ -383,5 +383,20 @@ revisit point 18 if the multi-case performance threshold requires it.
   exactly from the generic candidate body.
 - Expected benefit: remove the general row loop's compare, step, and backedge
   from decode M=1/2/4/8/16/32 without changing large-grid code generation.
+- Correctness: all 26 records PASS with unchanged error bounds.
+- Event speedups for the small path M=1/2/4/8/16/32 are
+  0.9987x/1.0019x/1.0009x/0.9985x/0.9989x/1.0005x. Eliminating the source
+  loop provides no measurable decode benefit; launch latency dominates.
+- The unchanged M=64/128 paths measure 0.9980x/0.9980x. Unchanged prefill
+  is noisy in both directions, including M4096 0.9738x and M8192 1.0105x.
+- M16384 msprof is 379.472 us candidate versus 377.591 us baseline
+  (0.9950x), a 0.50% regression on unchanged large-path source.
+- Decision: rejected and reverted. No targeted decode shape reaches the 3%
+  retention threshold, and the large-path controls expose run/order noise.
 - `hit_optimization_point: 12`
 - `ir_has_more_suggestions: false`
+
+### R5 rollback confirmation (awaiting remote result)
+
+- The loop-free kernel and host dispatch are removed. Candidate is restored
+  to the frozen R0 source before checking point 13.
