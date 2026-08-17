@@ -391,5 +391,29 @@ frozen baseline, validate correctness first, then compare all target cases.
   for this dynamic grid-stride kernel in the installed compiler, and its timing
   variation is non-beneficial.
 
+### R10 rollback confirmation (`543334d`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returns to R3 at 477.96 us Event and 438.90 us msprof.  The baseline
+  msprof sample is elevated, so candidate absolute Task Duration is the stable
+  rollback indicator.
+
+### R11 — optimization point 30: remove row-loop double buffering (pending)
+
+- Unique change: candidate row-loop `num_stages` changes from 2 to 1; frozen
+  baseline remains at 2.  No other compiler option is enabled.
+- IR basis: stage 2 emits an iteration counter alloca, `urem 2`, five ping-pong
+  buffer selects, and about 82 KiB UB use.  A5 guidance normally keeps
+  `num_stages=1`; R3's within-iteration residual prefetch already supplies the
+  only independent GM-read overlap found by optimization point 11.
+- Function/precision: grid-stride ownership, row order, int64 element offsets,
+  R3 load order, both FP32 reductions, two BF16 rounding boundaries, and all
+  three stores are unchanged.
+- Expected impact: remove stage-selection scalar work and duplicate UB buffers;
+  the measured tradeoff is potentially reduced inter-row MTE2/Vector overlap.
+- Validation gate: all 12 candidate correctness cases must pass; then compare
+  every Event case, forced M16384 msprof pipeline data, and IR control/sync/UB
+  changes.  Retain only a stable >=3% incremental gain over R3.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
