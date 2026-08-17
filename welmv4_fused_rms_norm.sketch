@@ -224,8 +224,29 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 1`
 - `ir_has_more_suggestions: false`
 
-### R1 rollback confirmation (awaiting remote result)
+### R1 rollback confirmation (`6a445b9`)
 
 - Candidate epsilon is restored to runtime `float`; candidate is again exactly
   identical to the frozen R0 baseline.
-- This confirmation must return to the R0 noise band before point 3 is tested.
+- Correctness: all 26 records PASS.
+- M16384 msprof is 380.218 us candidate versus 379.085 us baseline
+  (0.9970x), back inside the established R0 noise band.
+- Representative Event results are also mixed around parity: M4096 0.9889x,
+  M8192 1.0064x, and M16384 0.9993x.
+- Decision: rollback confirmed; point 3 may start from this clean R0 source.
+
+### R2 — optimization point 3: physical-AIV contiguous partition (awaiting remote result)
+
+- Hit condition: R0 prefill launches `physical_AIV*8 = 448` programs on 56
+  physical vector cores and assigns rows by an interleaved grid-stride loop.
+- Unique optimization point: candidate grid becomes `min(M, physical_AIV)`;
+  each program receives one contiguous ceil-divided row interval. Baseline
+  stays at `min(M, physical_AIV*8)` with the production interleaved schedule.
+- Isolation from point 6: column mask, int64 output/residual addresses, generic
+  2D/3D kv division/remainder, and all other source expressions are unchanged.
+- Function: contiguous intervals are disjoint, cover `[0, M)`, and retain the
+  same per-row reduction and three output stores.
+- Precision: FP32 residual add/reduction, BF16 gamma-input round, FP32 copy,
+  and both BF16 outputs are unchanged.
+- `hit_optimization_point: 3`
+- `ir_has_more_suggestions: false`
