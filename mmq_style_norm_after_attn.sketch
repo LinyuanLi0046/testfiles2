@@ -151,5 +151,22 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected and fully reverted.  The long contiguous per-program loop
   loses the fine-grained task scheduling/pipeline behavior of the 8x grid.
 
+### R1 rollback confirmation (`d8bb308`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returned to the R0 noise band: decode 0.9959-1.0021x and prefill
+  0.9995-1.0151x.  The isolated 1.5% M4096 result is below the retention
+  threshold and not treated as a gain.
+
+### R2 — optimization point 6: avoid scalar lowering (pending remote result)
+
+- Unique change: candidate column LT mask uses fp32 and linear element offsets
+  use int32 instead of int64.
+- Bounds proof: `(16384 * 2048) - 1 = 33,554,431 < 2^31 - 1`.
+- Function/precision: row ownership, FP32 RMS reductions, gamma operations,
+  both BF16 rounding boundaries, and all three stores are unchanged.
+- Expected IR impact: eliminate i64 vector add/multiply/convert lowering in row
+  address generation and use a vector-supported floating-point LT comparison.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
