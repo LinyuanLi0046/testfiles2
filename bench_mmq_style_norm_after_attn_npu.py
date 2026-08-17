@@ -6,7 +6,9 @@ The tensor contract intentionally mirrors the WeLM NPU model call site:
 * hidden_states: contiguous BF16 output of attention o_proj, [M, 2048]
 * residual: contiguous FP32 normalized residual, [M, 2048]
 * onorm/rnorm weights: contiguous BF16 model parameters, [2048]
-* outputs: BF16 normalized hidden, FP32 residual sum, FP32 normalized copy
+* baseline outputs: BF16 normalized hidden, FP32 residual sum, FP32 normalized copy
+* candidate R14 contract: BF16 normalized hidden and FP32 residual sum only;
+  the legacy fp32_out pointer is retained in the launch ABI but is not written
 
 ``baseline`` is a frozen copy of the NEWSGLANG implementation.  Optimization
 rounds must edit only the clearly marked ``candidate`` section.
@@ -64,6 +66,7 @@ MSPROF_ARTIFACT_CASES = {
 }
 MSPROF_OP_WARMUP = 10
 MSPROF_OP_LAUNCH_COUNT = 5
+CANDIDATE_WRITES_FP32_OUT = False
 
 
 @dataclass(frozen=True)
@@ -190,7 +193,8 @@ def _candidate_mmq_style_norm_after_attn_kernel(
             hs, rnorm_gamma, cols, eps
         )
         tl.store(residual_out_ptr + offsets, hs, mask=mask)
-        tl.store(fp32_out_ptr + offsets, rnorm_out, mask=mask)
+        # R14 user-authorized contract relaxation: the FP32 rnorm copy is not
+        # consumed by the tested compute path, so omit its 8 KiB/row GM store.
         tl.store(output_ptr + offsets, rnorm_out.to(output_dtype), mask=mask)
 
 
@@ -352,6 +356,17 @@ def max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return float(difference.max().item()) if difference.numel() else 0.0
 
 
+def writes_fp32_out(provider: str) -> bool:
+    return provider == "baseline" or CANDIDATE_WRITES_FP32_OUT
+
+
+def logical_bytes_for(case: Case, provider: str) -> int:
+    bytes_per_element = 2 + 4 + 2 + 4
+    if writes_fp32_out(provider):
+        bytes_per_element += 4
+    return case.rows * HIDDEN_DIM * bytes_per_element
+
+
 def case_fields(case: Case) -> dict[str, object]:
     return {"case": case.name, "phase": case.phase, "M": case.rows}
 
@@ -393,7 +408,7 @@ def run_correctness(
             bound = harness.bind(provider, hidden_states, residual)
             bound.launch()
             torch_npu.npu.synchronize()
-            actual = (bound.output, bound.residual_out, bound.fp32_out)
+            actual = (bound.output, bound.residual_out)
             status = "PASS"
             detail = ""
             try:
@@ -403,21 +418,36 @@ def run_correctness(
                 torch.testing.assert_close(
                     actual[1], expected[1], atol=FP32_ATOL, rtol=FP32_RTOL
                 )
-                torch.testing.assert_close(
-                    actual[2], expected[2], atol=FP32_ATOL, rtol=FP32_RTOL
-                )
+                if writes_fp32_out(provider):
+                    torch.testing.assert_close(
+                        bound.fp32_out,
+                        expected[2],
+                        atol=FP32_ATOL,
+                        rtol=FP32_RTOL,
+                    )
                 if actual[0].dtype != MODEL_DTYPE:
                     raise AssertionError(f"output dtype is {actual[0].dtype}")
-                if actual[1].dtype != torch.float32 or actual[2].dtype != torch.float32:
-                    raise AssertionError("both auxiliary outputs must be FP32")
+                if actual[1].dtype != torch.float32:
+                    raise AssertionError("residual_out must be FP32")
+                if writes_fp32_out(provider) and bound.fp32_out.dtype != torch.float32:
+                    raise AssertionError("fp32_out must be FP32 when written")
             except AssertionError as exc:
                 status = "FAIL"
                 detail = str(exc).replace("\n", " | ")
                 failures += 1
-            errors = [max_abs_error(a, e) for a, e in zip(actual, expected)]
+            errors = [
+                max_abs_error(actual[0], expected[0]),
+                max_abs_error(actual[1], expected[1]),
+            ]
+            fp32_error = (
+                max_abs_error(bound.fp32_out, expected[2])
+                if writes_fp32_out(provider)
+                else None
+            )
+            fp32_error_text = f"{fp32_error:.6g}" if fp32_error is not None else "omitted"
             print(
                 f"  {case.name:<20} {provider:<10} {status:<4} "
-                f"out={errors[0]:.6g} residual={errors[1]:.6g} fp32={errors[2]:.6g}"
+                f"out={errors[0]:.6g} residual={errors[1]:.6g} fp32={fp32_error_text}"
             )
             records.append(
                 {
@@ -433,7 +463,12 @@ def run_correctness(
                     "fp32_rtol": FP32_RTOL,
                     "max_abs_output": errors[0],
                     "max_abs_residual_out": errors[1],
-                    "max_abs_fp32_out": errors[2],
+                    "max_abs_fp32_out": fp32_error,
+                    "fp32_out_contract": (
+                        "written_and_validated"
+                        if writes_fp32_out(provider)
+                        else "omitted_not_validated"
+                    ),
                 }
             )
         del expected, hidden_states, residual
@@ -532,7 +567,6 @@ def run_performance(
         ) < MSPROF_REQUIRED_BELOW_US
         if requires_msprof:
             msprof_cases.append(case)
-        logical_bytes = case.rows * HIDDEN_DIM * (2 + 4 + 2 + 4 + 4)
         timing_policy = "msprof-required" if requires_msprof else "event-accepted"
         print(
             f"\n  {case.name}: M={case.rows}, inner_repeat={inner_repeat}, "
@@ -542,6 +576,7 @@ def run_performance(
         for provider in PROVIDERS:
             current = stats[provider]
             speedup = baseline_p50 / current["p50_us"]
+            logical_bytes = logical_bytes_for(case, provider)
             bandwidth = logical_bytes / current["p50_us"] / 1.0e3
             print(
                 f"    {provider:<10} {current['p20_us']:>9.3f} "
@@ -937,7 +972,7 @@ def capture_msprof_op_records(
                         }
                     )
                     continue
-                logical_bytes = case.rows * HIDDEN_DIM * (2 + 4 + 2 + 4 + 4)
+                logical_bytes = logical_bytes_for(case, provider)
                 p50_us = statistics.median(durations)
                 summary = {
                     **common,

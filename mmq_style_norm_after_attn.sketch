@@ -493,5 +493,19 @@ frozen baseline, validate correctness first, then compare all target cases.
 - `ir_has_more_suggestions: false`
 - Retained candidate: R3 residual-load reordering at BLOCK_SIZE=2048.
 
+### R14 — user-authorized contract relaxation: omit candidate fp32_out store (pending)
+
+- Unique kernel change: remove only the candidate `fp32_out` GM store.  Keep
+  the legacy pointer in the standalone launch ABI and keep returning the FP32
+  `residual_out`; the frozen baseline remains byte-for-byte unchanged.
+- Candidate logical traffic falls from 16 to 12 bytes/element (32 to 24 KiB
+  per row), eliminating 128 MiB of writes at M=16384.
+- Validation contract: baseline still validates all three outputs.  Candidate
+  validates BF16 `output` and FP32 `residual_out`; `fp32_out` is explicitly
+  recorded as omitted and its uninitialized buffer is never inspected.
+- Arithmetic is unchanged in this round: both BF16 rounding boundaries and
+  both FP32 RMS reductions remain identical to the accepted R3 candidate.
+- Status: pending remote correctness, Event, msprof, compiler IR, and profile.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
