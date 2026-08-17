@@ -452,5 +452,27 @@ frozen baseline, validate correctness first, then compare all target cases.
   non-critical writeback pipeline but slightly lengthens the MTE2/scalar
   critical path, so it neither improves latency nor unlocks an MTE2 strategy.
 
+### R12 rollback confirmation (`e5ac6f3`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returns to R3 at 477.82 us Event and 436.81 us msprof.
+
+### R13 — optimization point 30: group rnorm output stores (pending)
+
+- Unique change: candidate store order becomes output BF16, fp32_out FP32,
+  residual_out FP32.  Frozen baseline remains residual_out, fp32_out, output.
+- Dependency proof: the three stores have disjoint pointers and final values.
+  Unlike R12, the BF16 and FP32 consumers of `rnorm_out` are adjacent; the
+  independent `hs` residual_out write is last.
+- IR basis: R12 proved output-first can remove two SET/WAIT pairs and halve
+  MTE3 activity, but placing residual_out between the two rnorm_out stores
+  increased MTE2/scalar time.  Producer grouping tests whether shorter
+  `rnorm_out` lifetime retains the sync reduction without that regression.
+- Function/precision: values, dtypes, masks, addresses, store count, reductions,
+  and BF16 rounding boundaries are unchanged.
+- Validation gate: all correctness cases, all Event cases, forced M16384 msprof,
+  SET/WAIT, and MTE2/MTE3/scalar pipeline metrics.  Retain only a stable >=3%
+  incremental gain over R3.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
