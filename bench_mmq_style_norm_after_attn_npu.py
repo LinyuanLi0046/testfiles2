@@ -174,7 +174,7 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     output_dtype = output_ptr.dtype.element_ty
 
     for row_id in tl.range(
-        tl.program_id(0), rows, tl.num_programs(0), num_stages=1
+        tl.program_id(0), rows, tl.num_programs(0), num_stages=2
     ):
         offsets = (row_id * cols + cols_offsets).to(tl.int64)
         hs = tl.load(hidden_states_ptr + offsets, mask=mask, other=0.0)

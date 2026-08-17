@@ -398,7 +398,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   msprof sample is elevated, so candidate absolute Task Duration is the stable
   rollback indicator.
 
-### R11 — optimization point 30: remove row-loop double buffering (pending)
+### R11 — optimization point 30: remove row-loop double buffering (rejected)
 
 - Unique change: candidate row-loop `num_stages` changes from 2 to 1; frozen
   baseline remains at 2.  No other compiler option is enabled.
@@ -411,9 +411,16 @@ frozen baseline, validate correctness first, then compare all target cases.
   three stores are unchanged.
 - Expected impact: remove stage-selection scalar work and duplicate UB buffers;
   the measured tradeoff is potentially reduced inter-row MTE2/Vector overlap.
-- Validation gate: all 12 candidate correctness cases must pass; then compare
-  every Event case, forced M16384 msprof pipeline data, and IR control/sync/UB
-  changes.  Retain only a stable >=3% incremental gain over R3.
+- Correctness: all 12 candidate cases PASS; all 24 baseline/candidate records
+  pass and errors match R3.
+- Performance: decode is neutral.  Prefill remains exactly in the R3 band;
+  M16384 is 477.84 us Event and 439.48 us msprof.
+- IR impact: TTIR and TTAdapter hashes change because their loop attribute says
+  `tt.num_stages = 1`, but final IR remains exactly 59,719 bytes with the same
+  SHA-256 as R3.  The backend emits the identical stage-selection and ping-pong
+  implementation, so no instruction, sync, or UB change reaches the device.
+- Decision: rejected and fully reverted.  This compiler normalizes/ignores the
+  source stage change during final A5 lowering, and measured time is unchanged.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
