@@ -174,14 +174,42 @@ revisit point 18 if the multi-case performance threshold requires it.
 
 ## 6. Optimization log
 
-### R0 — workspace migration and frozen equivalence (awaiting remote result)
+### R0 — workspace migration and frozen equivalence (`abf5cb8`)
 
 - Unique change: replace the previous after-attention two-RMS benchmark with
   the production `WelmV4FusedRMSNorm.rms_norm_kernel` PPLN input-norm path.
 - Baseline and candidate source are intentionally identical.
 - Target set includes all requested decode/prefill M values, including the
   non-power-of-two prefill case M=16361.
-- Expected result: all 26 correctness records pass and candidate/baseline
-  performance establishes the new operator's measurement noise band.
+- Correctness: all 26 records PASS. Baseline/candidate per-case errors are
+  identical; maximum BF16 output/residual error is 0.015625 and maximum FP32
+  copy error is 1.43e-6.
+- Event R0 baseline/candidate p50 in microseconds:
+  - decode M=1/2/4/8/16/32/64/128: baseline
+    33.809/33.388/33.424/33.537/33.754/33.924/33.567/33.700;
+    candidate 33.624/33.320/33.260/33.390/33.661/33.801/33.598/33.621.
+  - prefill M=4096/8192/9616/16361/16384: baseline
+    74.968/209.335/249.689/426.794/425.700; candidate
+    75.213/210.220/250.271/427.185/426.581.
+- Forced M16384 msprof: baseline 380.736 us, candidate 380.046 us
+  (1.0018x), establishing an approximately sub-1% same-source noise band.
+- R0 candidate profiler mean per AIV: total 369.38 us, MTE2 272.52 us,
+  MTE3 141.66 us, Vector 109.68 us, Scalar 48.10 us. No spill is present;
+  gamma is hoisted outside the row loop.
 - `hit_optimization_point: None`
+- `ir_has_more_suggestions: false`
+
+### R1 — optimization point 1: constexpr epsilon (awaiting remote result)
+
+- Hit condition: the timed/model epsilon is fixed at `1e-5`, but R0 keeps it
+  as a runtime `f32` kernel argument. Final IR stores that scalar into UB at
+  entry and reloads it for the RMS denominator.
+- Unique change: annotate only candidate kernel `eps` as `tl.constexpr`.
+  Frozen baseline remains runtime `float`.
+- Dynamic M and all M-derived stride/kv parameters remain unspecialized.
+- Function/precision: the epsilon value and every tensor operation, dtype,
+  reduction, rounding point, row assignment, and output store are unchanged.
+- Expected IR effect: constant-fold epsilon and remove its runtime kernel
+  argument/UB scalar materialization.
+- `hit_optimization_point: 1`
 - `ir_has_more_suggestions: false`

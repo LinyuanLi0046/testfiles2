@@ -198,7 +198,7 @@ def _candidate_rms_norm_kernel(
     out_copy_ptr: tl.tensor,
     rows: int,
     cols: tl.constexpr,
-    eps: float,
+    eps: tl.constexpr,
     hidden_states_row_stride: int,
     hidden_states_num_kv: int,
     hidden_states_kv_stride: int,
