@@ -258,12 +258,17 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected.  Wider masked lanes increase reduction/synchronization
   work without reducing grid or GM traffic.
 
-### R6 — final Block Size Scaling: 4096 to 8192 (pending)
+### R6 — final Block Size Scaling: 4096 to 8192 (compile failure; stop)
 
 - Unique change from R5: double only the candidate launch `BLOCK_SIZE` from
   4096 to 8192; baseline remains frozen at 2048 and kernel logic is unchanged.
 - Stop rule remains compile/verify/correctness failure; otherwise continue the
   documented ordered scaling sequence.
+- Result: BiShengIR `buildFinalHIVMPipelines` fails with UB overflow.  The
+  candidate requires 2,359,808 bits while A5 exposes 2,031,616 bits (248 KiB).
+- Decision: stop scaling as required; do not attempt 16384 or 32768.  Restore
+  2048 because 4096 is slower and 8192 cannot compile.  The accepted R3 load
+  reordering at exact-width BLOCK_SIZE=2048 remains the final best candidate.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
