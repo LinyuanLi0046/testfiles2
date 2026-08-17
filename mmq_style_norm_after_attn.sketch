@@ -422,5 +422,27 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected and fully reverted.  This compiler normalizes/ignores the
   source stage change during final A5 lowering, and measured time is unchanged.
 
+### R11 rollback confirmation (`9e61322`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returns to R3 at 477.34 us Event and 439.59 us msprof.
+
+### R12 — optimization point 30: BF16 output-first store schedule (pending)
+
+- Unique change: candidate store order becomes output BF16, residual_out FP32,
+  fp32_out FP32.  Frozen baseline remains residual_out, fp32_out, output.
+- Dependency proof: all three outputs use disjoint pointers and their values are
+  final before the first store; no store feeds another computation or store.
+- IR basis: R3 emits two FP32 MTE3 stores, then an MTE3-to-Vector wait for the
+  BF16 conversion, then the BF16 MTE3 store.  R4 moved only the conversion while
+  preserving store order and gained nothing; output-first also moves its store,
+  directly testing whether the mid-sequence wait can be eliminated.
+- Function/precision: stored values, dtypes, masks, addresses, store count,
+  reductions, and both BF16 rounding boundaries are unchanged.  Return tuple
+  order is a Python binding property and is not affected by device store order.
+- Validation gate: require all 12 candidate correctness cases, then compare all
+  Event cases, M16384 msprof MTE3/wait metrics, and final SET/WAIT/store order.
+  Retain only a stable >=3% incremental gain over R3.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.

@@ -189,9 +189,9 @@ def _candidate_mmq_style_norm_after_attn_kernel(
         rnorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, rnorm_gamma, cols, eps
         )
+        tl.store(output_ptr + offsets, rnorm_out.to(output_dtype), mask=mask)
         tl.store(residual_out_ptr + offsets, hs, mask=mask)
         tl.store(fp32_out_ptr + offsets, rnorm_out, mask=mask)
-        tl.store(output_ptr + offsets, rnorm_out.to(output_dtype), mask=mask)
 
 
 PROVIDERS = {
