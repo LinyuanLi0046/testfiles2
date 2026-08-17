@@ -457,7 +457,7 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Correctness: all 24 baseline/candidate records PASS.
 - Candidate returns to R3 at 477.82 us Event and 436.81 us msprof.
 
-### R13 — optimization point 30: group rnorm output stores (pending)
+### R13 — optimization point 30: group rnorm output stores (rejected)
 
 - Unique change: candidate store order becomes output BF16, fp32_out FP32,
   residual_out FP32.  Frozen baseline remains residual_out, fp32_out, output.
@@ -470,9 +470,28 @@ frozen baseline, validate correctness first, then compare all target cases.
   `rnorm_out` lifetime retains the sync reduction without that regression.
 - Function/precision: values, dtypes, masks, addresses, store count, reductions,
   and BF16 rounding boundaries are unchanged.
-- Validation gate: all correctness cases, all Event cases, forced M16384 msprof,
-  SET/WAIT, and MTE2/MTE3/scalar pipeline metrics.  Retain only a stable >=3%
-  incremental gain over R3.
+- Correctness: all 12 candidate cases PASS; all 24 records pass and match R3.
+- Performance: decode is neutral and prefill remains in the R3 Event band.
+  M16384 msprof is 438.89 us versus the immediately preceding R3 confirmation
+  at 436.81 us, about 0.48% slower.
+- IR/profile impact: like R12, final IR has 13/13 SET/WAIT pairs and about
+  88.17 us MTE3 time.  Grouping the rnorm consumers reduces the R12 regression,
+  but versus the same-run R3 profile MTE2 still rises 266.48 -> 267.20 us,
+  scalar rises 55.11 -> 56.51 us, and AIV rises 430.15 -> 430.56 us.
+- Decision: rejected and fully reverted.  The remaining writeback savings are
+  outside the MTE2/scalar critical path and do not improve kernel latency.
+
+### Final ordered scan status after R13
+
+- Optimization points 1-29 have either been measured or do not meet their hit
+  conditions; the mandatory Block Size Scaling sequence is complete.
+- Repeated point-30 IR iterations exhausted staging controls, conversion/store
+  scheduling, and early-store opportunities supported by the captured IR.
+- Further store permutations would be blind enumeration without a new IR
+  dependency hypothesis and are prohibited by the latency optimizer workflow.
+- `hit_optimization_point: None`
+- `ir_has_more_suggestions: false`
+- Retained candidate: R3 residual-load reordering at BLOCK_SIZE=2048.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
