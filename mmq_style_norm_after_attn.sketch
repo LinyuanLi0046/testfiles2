@@ -270,7 +270,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   2048 because 4096 is slower and 8192 cannot compile.  The accepted R3 load
   reordering at exact-width BLOCK_SIZE=2048 remains the final best candidate.
 
-### D1 — second-stage forced msprof pipeline capture (pending)
+### D1 — second-stage forced msprof pipeline capture (complete)
 
 - Candidate and frozen baseline code are unchanged from the confirmed R3/2048
   state; this is measurement instrumentation, not an optimization attempt.
@@ -279,6 +279,25 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Repeated Event records remain authoritative under the >=30 us timing rule;
   msprof Task Duration and full pipeline/timeline artifacts are diagnostic
   evidence for a new ordered latency-optimizer scan and IR iteration.
+- Correctness remains 24/24 PASS.  M16384 msprof Task Duration is 533.61 us
+  baseline versus 437.95 us candidate (1.2184x), consistent with Event's
+  572.93 versus 480.07 us (1.1934x).
+- Across 56 vector cores, R3 cuts mean MTE2 time from 361.73 to 266.03 us
+  (-26.5%) while vector time changes only 207.21 to 204.91 us (-1.1%).
+  Remaining mean scalar time is 55.10 us and final IR still materializes the
+  runtime `eps` scalar in UB at kernel entry.
+
+### R7 — optimization point 1: constexpr eps (pending)
+
+- Unique change: declare only candidate kernel `eps` as `tl.constexpr`; frozen
+  baseline retains the runtime `float` parameter.
+- Validity: every target launch passes the fixed model-contract value 1e-5;
+  dynamic M remains unspecialized and no tensor shape/dtype is specialized.
+- Function/precision: the exact same Python float value enters both RMS
+  expressions; reductions, FP32 arithmetic, and both BF16 rounding boundaries
+  are unchanged.
+- Expected IR impact: fold eps as a compile-time constant and remove its entry
+  UB scalar store/load plus dependent synchronization.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.

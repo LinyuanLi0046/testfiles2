@@ -164,7 +164,7 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     fp32_out_ptr: tl.tensor,
     rows: int,
     cols: tl.constexpr,
-    eps: float,
+    eps: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     cols_offsets = tl.arange(0, BLOCK_SIZE)
