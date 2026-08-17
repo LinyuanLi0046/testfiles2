@@ -143,12 +143,6 @@ def _baseline_mmq_style_norm_after_attn_kernel(
 # ---------------------------------------------------------------------------
 
 
-# R1 optimization point 3 (vector-core partition): cap the candidate grid at
-# the physical AIV count.  Contiguous per-program chunks still cover every
-# dynamic row; only excess NPU program scheduling is removed.
-CANDIDATE_PROGRAMS_PER_VECTOR_CORE = 1
-
-
 @triton.jit
 def _candidate_do_mmq_rms_norm(hidden, gamma, cols: int, eps: tl.constexpr):
     hidden = hidden.to(gamma.dtype)
@@ -174,18 +168,15 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     cols_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = cols_offsets.to(tl.float32) < cols
+    mask = cols_offsets < cols
     onorm_gamma = tl.load(onorm_gamma_ptr + cols_offsets, mask=mask, other=0.0)
     rnorm_gamma = tl.load(rnorm_gamma_ptr + cols_offsets, mask=mask, other=0.0)
     output_dtype = output_ptr.dtype.element_ty
 
-    program_id = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    rows_per_program = (rows + num_programs - 1) // num_programs
-    row_start = program_id * rows_per_program
-    row_end = tl.minimum(row_start + rows_per_program, rows)
-    for row_id in tl.range(row_start, row_end, num_stages=2):
-        offsets = (row_id * cols + cols_offsets).to(tl.int32)
+    for row_id in tl.range(
+        tl.program_id(0), rows, tl.num_programs(0), num_stages=2
+    ):
+        offsets = (row_id * cols + cols_offsets).to(tl.int64)
         hs = tl.load(hidden_states_ptr + offsets, mask=mask, other=0.0)
         onorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, onorm_gamma, cols, eps
@@ -292,12 +283,7 @@ class Harness:
         output = torch.empty_like(hidden_states)
         residual_out = torch.empty_like(hidden_states, dtype=torch.float32)
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
-        programs_per_vector_core = (
-            CANDIDATE_PROGRAMS_PER_VECTOR_CORE
-            if provider == "candidate"
-            else PROGRAMS_PER_VECTOR_CORE
-        )
-        num_programs = min(rows, self.num_vector_cores * programs_per_vector_core)
+        num_programs = min(rows, self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE)
         kernel = PROVIDERS[provider]
 
         def launch() -> object:

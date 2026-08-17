@@ -2,7 +2,7 @@
 
 ```python
 # @architecture_decision("single-fused-row-reduction", reason="两次 RMS 归约具有相同逐行粒度；融合保留中间值并避免额外 GM tensor 与 kernel launch")
-# @architecture_decision("physical-aiv-contiguous-partition", reason="DAV_3510 的 NPU program 不应超额订阅物理 vector core，且每个 task 应处理连续 row chunk")
+# @architecture_decision("grid-stride-row-tasks", reason="R1 实测 physical-AIV contiguous chunk 使 prefill 退化至 0.262-0.315x；保留每 AIV 8 个细粒度 task")
 sketch mmq_style_norm_after_attn {
   symbols: M, N;
   tensors: hidden_states[M, N]: bf16; residual[M, N]: f32;
@@ -12,14 +12,14 @@ sketch mmq_style_norm_after_attn {
   constexpr: N;
 
   @llm_hint("parallel", "coreidx")
-  for program_id in range(min(M, physical_vector_cores)):
+  for program_id in range(min(M, physical_vector_cores * 8)):
     onorm_weight = alloc([N], llm_hint=["fast", "input_cache"])
     rnorm_weight = alloc([N], llm_hint=["fast", "input_cache"])
     load(onorm_gamma[0:N] -> onorm_weight)
     load(rnorm_gamma[0:N] -> rnorm_weight)
 
     @llm_hint("pipeline", "vectorize")
-    for row_id in contiguous_row_chunk(program_id, M):
+    for row_id in grid_stride_rows(program_id, M):
       hs_bf16 = alloc([N], llm_hint=["fast", "input_cache"])
       load(hidden_states[row_id, 0:N] -> hs_bf16)
       onorm_fp32 = rms_norm_fp32(hs_bf16, onorm_weight, eps)
@@ -75,18 +75,15 @@ Frozen baseline host grid matches production:
 
 `num_programs = min(M, physical_vector_cores * 8)`
 
-R1 changes only the candidate grid to:
+R1 tested the following candidate grid:
 
 `num_programs = min(M, physical_vector_cores)`
 
 The baseline and candidate both retain `num_stages=2` on the dynamic row loop.
-Each candidate program receives one contiguous row chunk, satisfying the NPU
-task-partition checklist while preserving complete dynamic-M coverage.  Decode
-M<=56 retains one program per row on the measured 56-AIV device; larger decode
-and prefill cases test whether removing the baseline's eightfold NPU program
-oversubscription reduces scheduling overhead without reducing physical-core
-utilization.  Row/column offsets remain int32 because the largest target offset
-is below 2^31; no index precision is lost.
+Each candidate program received one contiguous row chunk and used int32 target
+offsets.  Correctness passed, but prefill performance regressed to 0.262-0.315x,
+so the complete R1 change was rejected and candidate returned to the frozen
+grid-stride implementation with eight programs per physical vector core.
 
 ## 3. Memory and precision budget
 
@@ -138,15 +135,21 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Timing: repeated NPU Event is authoritative for all cases because both
   provider medians were at least 30 us.
 
-### R1 — optimization point 3: vector-core partition (pending remote result)
+### R1 — optimization point 3: vector-core partition (rejected)
 
 - Unique change: candidate programs-per-vector-core 8 -> 1.
 - Function: all rows remain covered exactly once via contiguous per-program
   chunks; the largest target element offset is safe in int32.
 - Precision: kernel arithmetic, FP32 reductions, two BF16 rounding boundaries,
   and the BF16/FP32/FP32 return stores are unchanged.
-- Expected IR impact: fewer physical program instances for M > physical
-  vector-core count, contiguous row-loop increments, and no i64 offset math.
+- Correctness: all 12 candidate cases PASS; maximum errors match R0.
+- Timing: repeated NPU Event is authoritative for every case.
+- Decode: 0.9957-1.0022x, entirely within the established noise band.
+- Prefill speedups for M=4096/8192/9616/16384: 0.2624x / 0.3120x /
+  0.3148x / 0.3141x.  Candidate times were 448.69 / 922.50 / 1072.81 /
+  1826.16 us versus baseline 117.73 / 287.78 / 337.76 / 573.51 us.
+- Decision: rejected and fully reverted.  The long contiguous per-program loop
+  loses the fine-grained task scheduling/pipeline behavior of the 8x grid.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
