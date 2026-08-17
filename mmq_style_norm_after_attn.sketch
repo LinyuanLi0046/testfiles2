@@ -338,7 +338,7 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected and fully reverted.  A5 cannot overlap the two consumers
   of the same `hs` UB buffer cheaply in this lowering.
 
-### R9 — optimization point 30: Ascend multibuffer compile option (pending)
+### R9 — optimization point 30: Ascend multibuffer compile option (rejected)
 
 - Unique change: pass `multibuffer=True` only when launching the candidate;
   the frozen baseline launch continues to use the compiler default.
@@ -351,9 +351,16 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Function/precision: kernel source, row ownership, int64 addressing, both FP32
   reductions, two BF16 rounding boundaries, three stores, and all tensor values
   are unchanged.
-- Validation gate: require all 12 candidate correctness cases to pass, then
-  compare full Event data plus forced M16384 msprof and captured IR.  Retain
-  only a stable >=3% incremental gain over accepted R3.
+- Correctness: all 12 candidate cases PASS; all 24 baseline/candidate records
+  pass and errors match the accepted R3 candidate.
+- Performance: M16384 Event is 480.56 us (1.1930x versus baseline), remaining
+  inside the R3 run-to-run band.  Forced msprof is 440.80 us versus the recent
+  R3 rollback value 438.91 us, about 0.43% slower rather than an improvement.
+- IR impact: none.  TTIR, TTAdapter, and final IR sizes remain 10,574 / 12,939 /
+  59,719 bytes and all three SHA-256 hashes exactly match R3 byte-for-byte.
+- Decision: rejected and fully reverted.  This compiler option does not alter
+  code generation for the existing dynamic grid-stride loop, so the observed
+  timing difference is measurement noise and cannot satisfy the 3% gate.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
