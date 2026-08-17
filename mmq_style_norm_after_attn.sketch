@@ -228,5 +228,25 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected and fully reverted.  The original compiler schedule is the
   locally efficient form; no further actionable point-30 IR suggestion remains.
 
+### R4 rollback confirmation (`eddff27`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returned to the accepted R3 band: decode 0.9987-1.0018x and prefill
+  1.1815-1.2169x.
+
+### R5 — final Block Size Scaling: 2048 to 4096 (pending)
+
+- Trigger: the kernel has one statically resolvable one-dimensional
+  `BLOCK_SIZE`, is not autotuned, and has no second block dimension.
+- Scaling plan: current 2048; ordered candidates 4096, 8192, 16384, 32768.
+  The documented hard limit is strictly below 65536, so 65536 is excluded.
+- Unique change: the binding layer passes 4096 only to candidate; the frozen
+  baseline continues to receive 2048.  Kernel logic and grid size are unchanged.
+- Function/precision: the first 2048 lanes contain the identical inputs and
+  arithmetic; added lanes are masked to zero for loads/stores.  Correctness is
+  authoritative because the wider reduction tree may change FP32 association.
+- Stop rule: stop scaling immediately on compile/verify/correctness failure;
+  otherwise benchmark in order and retain only a measured improvement.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
