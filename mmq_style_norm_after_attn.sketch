@@ -287,7 +287,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   Remaining mean scalar time is 55.10 us and final IR still materializes the
   runtime `eps` scalar in UB at kernel entry.
 
-### R7 — optimization point 1: constexpr eps (pending)
+### R7 — optimization point 1: constexpr eps (rejected)
 
 - Unique change: declare only candidate kernel `eps` as `tl.constexpr`; frozen
   baseline retains the runtime `float` parameter.
@@ -298,6 +298,16 @@ frozen baseline, validate correctness first, then compare all target cases.
   are unchanged.
 - Expected IR impact: fold eps as a compile-time constant and remove its entry
   UB scalar store/load plus dependent synchronization.
+- Correctness: all 12 candidate cases PASS; errors match the frozen baseline.
+- IR: the runtime f32 argument and entry UB scalar store are removed; entry IR
+  shrinks from 234 to 229 lines and scalar time falls 3.45%, but SET/WAIT counts
+  remain 15/15.
+- M16384 msprof candidate time is 437.47 us versus D1's 437.95 us, only about
+  0.1% incremental improvement.  Mean total AIV time improves 0.2%, while MTE2
+  and MTE3 time regress 0.88% and 0.38% respectively.
+- Event data has no stable >=3% incremental gain and decode is 1-2% slower.
+- Decision: rejected and fully reverted; the smaller scalar path does not
+  shorten the pipeline critical path or unlock a synchronization reduction.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
