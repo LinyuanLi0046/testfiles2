@@ -235,7 +235,7 @@ revisit point 18 if the multi-case performance threshold requires it.
   M8192 1.0064x, and M16384 0.9993x.
 - Decision: rollback confirmed; point 3 may start from this clean R0 source.
 
-### R2 — optimization point 3: physical-AIV contiguous partition (awaiting remote result)
+### R2 — optimization point 3: physical-AIV contiguous partition (`c957a55`, rejected)
 
 - Hit condition: R0 prefill launches `physical_AIV*8 = 448` programs on 56
   physical vector cores and assigns rows by an interleaved grid-stride loop.
@@ -248,5 +248,20 @@ revisit point 18 if the multi-case performance threshold requires it.
   same per-row reduction and three output stores.
 - Precision: FP32 residual add/reduction, BF16 gamma-input round, FP32 copy,
   and both BF16 outputs are unchanged.
+- Correctness: all 26 records PASS with unchanged error bounds.
+- Event speedups for prefill M=4096/8192/9616/16361/16384 are
+  0.9752x/0.9999x/0.9993x/1.0014x/0.9998x. Decode stays within +/-0.4%.
+- M16384 msprof is 377.804 us candidate versus 380.075 us baseline
+  (1.0060x), only +0.60% and inconsistent with the neutral Event result.
+- Profiler mean per AIV changes total 368.71 -> 369.87 us, MTE2
+  271.80 -> 273.57 us, MTE3 141.85 -> 138.30 us, Scalar
+  48.09 -> 44.94 us. Lower scalar/MTE3 work does not offset higher MTE2 time.
+- Decision: rejected. There is no >=3% stable gain and M4096 regresses 2.48%.
+  The production 8x grid-stride schedule is restored.
 - `hit_optimization_point: 3`
 - `ir_has_more_suggestions: false`
+
+### R2 rollback confirmation (awaiting remote result)
+
+- Candidate grid and row loop are restored byte-for-byte to the frozen R0
+  production schedule before point 5 is attempted.

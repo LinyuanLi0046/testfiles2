@@ -173,12 +173,6 @@ def _baseline_rms_norm_kernel(
 # ---------------------------------------------------------------------------
 
 
-# R2 optimization point 3: cap candidate launches at the physical AIV count.
-# Each candidate program owns one contiguous row interval instead of an
-# interleaved grid-stride stream. Baseline scheduling remains frozen.
-CANDIDATE_PROGRAMS_PER_VECTOR_CORE = 1
-
-
 @triton.jit
 def _candidate_do_rms_norm(hidden, gamma, cols: int, eps: tl.constexpr):
     hidden = hidden.to(gamma.dtype).to(tl.float32)
@@ -212,16 +206,14 @@ def _candidate_rms_norm_kernel(
     residual_after_layernorm: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    program_id = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    rows_per_program = (rows + num_programs - 1) // num_programs
-    row_start = program_id * rows_per_program
-    row_end = tl.minimum(row_start + rows_per_program, rows)
+    row_start = tl.program_id(0)
     cols_off = tl.arange(0, BLOCK_SIZE)
     mask = cols_off < cols
     gamma_shm = tl.load(gamma_ptr + cols_off, mask=mask, other=0.0)
     output_dtype = out_ptr.dtype.element_ty
-    for row_id in tl.range(row_start, row_end, num_stages=2):
+    for row_id in tl.range(
+        row_start, rows, tl.num_programs(0), num_stages=2
+    ):
         kv_idx = row_id // hidden_states_num_kv
         row_idx = row_id % hidden_states_num_kv
         kv_off = kv_idx * hidden_states_kv_stride
@@ -342,14 +334,7 @@ class Harness:
         output = torch.empty_like(hidden_states)
         residual_out = torch.empty_like(hidden_states)
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
-        programs_per_vector_core = (
-            CANDIDATE_PROGRAMS_PER_VECTOR_CORE
-            if provider == "candidate"
-            else PROGRAMS_PER_VECTOR_CORE
-        )
-        num_programs = min(
-            rows, self.num_vector_cores * programs_per_vector_core
-        )
+        num_programs = min(rows, self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE)
         kernel = PROVIDERS[provider]
 
         def launch() -> object:
