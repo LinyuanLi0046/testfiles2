@@ -287,6 +287,7 @@ class Harness:
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
         num_programs = min(rows, self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE)
         kernel = PROVIDERS[provider]
+        compile_options = {"multibuffer": True} if provider == "candidate" else {}
 
         def launch() -> object:
             return kernel[(num_programs,)](
@@ -301,6 +302,7 @@ class Harness:
                 HIDDEN_DIM,
                 EPS,
                 BLOCK_SIZE,
+                **compile_options,
             )
 
         return BoundLaunch(launch, output, residual_out, fp32_out)

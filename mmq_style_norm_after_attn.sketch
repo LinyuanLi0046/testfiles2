@@ -120,7 +120,8 @@ frozen baseline, validate correctness first, then compare all target cases.
 
 1. Establish R0 and inspect last-pass IR for spill/copy/scalarized reduction.
 2. Change only grid size/programs-per-core; compare decode and all prefill M.
-3. Change only row-loop `num_stages`; verify UB use and large-M latency.
+3. Change only the Ascend `multibuffer` compile option; verify emitted IR, UB
+   use, and large-M latency.  Do not tune GPU-style `num_stages` blindly.
 4. Change only row assignment/chunk size if IR shows loop/control overhead.
 5. Revisit data-movement/recomputation only when IR identifies redundant UB
    copies; preserve the two BF16 rounding boundaries and all three stores.
@@ -336,6 +337,23 @@ frozen baseline, validate correctness first, then compare all target cases.
   rises 17.1% and MTE3 wait rises 60.1%.
 - Decision: rejected and fully reverted.  A5 cannot overlap the two consumers
   of the same `hs` UB buffer cheaply in this lowering.
+
+### R9 — optimization point 30: Ascend multibuffer compile option (pending)
+
+- Unique change: pass `multibuffer=True` only when launching the candidate;
+  the frozen baseline launch continues to use the compiler default.
+- IR basis: the accepted R3 profile remains MTE2-heavy, while the latest
+  TTIR/TTAdapter records only `tt.num_stages = 2` and the final IR contains no
+  explicit multibuffer marker.
+- Platform basis: Ascend A5 controls multi-buffer scheduling with the
+  `multibuffer` compile option; increasing GPU-style `num_stages` is not the
+  documented NPU control.
+- Function/precision: kernel source, row ownership, int64 addressing, both FP32
+  reductions, two BF16 rounding boundaries, three stores, and all tensor values
+  are unchanged.
+- Validation gate: require all 12 candidate correctness cases to pass, then
+  compare full Event data plus forced M16384 msprof and captured IR.  Retain
+  only a stable >=3% incremental gain over accepted R3.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
