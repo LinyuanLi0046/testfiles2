@@ -270,7 +270,7 @@ revisit point 18 if the multi-case performance threshold requires it.
   Same-source msprof is 382.352 versus 378.863 us (0.9909x), demonstrating
   roughly 1% run/provider noise and reinforcing rejection of R2's +0.60%.
 
-### R3 — optimization point 5: eliminate integer remainder (awaiting remote result)
+### R3 — optimization point 5: eliminate integer remainder (`9a68cb5`, rejected)
 
 - Hit condition: the generic hidden-state address path computes both
   `row_id // hidden_states_num_kv` and `row_id % hidden_states_num_kv`; R0 IR
@@ -283,5 +283,20 @@ revisit point 18 if the multi-case performance threshold requires it.
   byte-for-byte unchanged; only integer address construction differs.
 - Dynamic M and M-derived values remain unspecialized.
 - Expected IR effect: remove one source-level signed remainder per row.
+- Correctness: all 26 records PASS with unchanged error bounds.
+- IR result: the target generic-address `llvm.srem` is removed; remaining
+  remainders belong to compiler loop/scheduling machinery. Final IR grows
+  slightly from 44,114 to 44,148 bytes due to multiply/subtract lowering.
+- Prefill Event speedups for M=4096/8192/9616/16361/16384 are
+  1.0155x/0.9949x/0.9978x/1.0009x/1.0002x. Decode is within +/-0.5%.
+- M16384 msprof is 380.892 us candidate versus 377.771 us baseline
+  (0.9918x), a 0.82% regression.
+- Decision: rejected and reverted. Removing one scalar remainder does not
+  improve the MTE-dominated critical path and is below the retention gate.
 - `hit_optimization_point: 5`
 - `ir_has_more_suggestions: false`
+
+### R3 rollback confirmation (awaiting remote result)
+
+- Candidate row-index expression is restored to production `%`; candidate is
+  again identical to frozen R0 before point 6.

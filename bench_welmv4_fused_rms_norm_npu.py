@@ -215,9 +215,7 @@ def _candidate_rms_norm_kernel(
         row_start, rows, tl.num_programs(0), num_stages=2
     ):
         kv_idx = row_id // hidden_states_num_kv
-        # R3 optimization point 5: reuse the quotient to avoid a separate
-        # integer remainder operation in the generic 2D/3D address path.
-        row_idx = row_id - kv_idx * hidden_states_num_kv
+        row_idx = row_id % hidden_states_num_kv
         kv_off = kv_idx * hidden_states_kv_stride
         h_offs = row_idx * hidden_states_row_stride + kv_off + cols_off
         r_offs = (row_id * residual_row_stride + cols_off).to(tl.int64)
