@@ -158,7 +158,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   0.9995-1.0151x.  The isolated 1.5% M4096 result is below the retention
   threshold and not treated as a gain.
 
-### R2 — optimization point 6: avoid scalar lowering (pending remote result)
+### R2 — optimization point 6: avoid scalar lowering (rejected)
 
 - Unique change: candidate column LT mask uses fp32 and linear element offsets
   use int32 instead of int64.
@@ -167,6 +167,15 @@ frozen baseline, validate correctness first, then compare all target cases.
   both BF16 rounding boundaries, and all three stores are unchanged.
 - Expected IR impact: eliminate i64 vector add/multiply/convert lowering in row
   address generation and use a vector-supported floating-point LT comparison.
+- Correctness: all 12 candidate cases PASS; maximum errors match R0.
+- Timing: repeated NPU Event is authoritative for every case.
+- Decode: 1.0046-1.0114x, below the retention threshold.
+- Prefill speedups for M=4096/8192/9616/16384: 0.2640x / 0.3103x /
+  0.3123x / 0.3127x.  Candidate times were 449.49 / 931.63 / 1086.01 /
+  1837.45 us versus baseline 118.68 / 289.13 / 339.21 / 574.63 us.
+- Decision: rejected and fully reverted.  On this A5 compiler, the original
+  i64 row-address expression is required for efficient large-M loop lowering;
+  the generic scalar-lowering guidance does not match the observed codegen.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.

@@ -168,9 +168,7 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     cols_offsets = tl.arange(0, BLOCK_SIZE)
-    # R2 optimization point 6: keep comparisons and pointer-offset arithmetic
-    # on vector-friendly f32/i32 paths for the bounded target M range.
-    mask = cols_offsets.to(tl.float32) < cols
+    mask = cols_offsets < cols
     onorm_gamma = tl.load(onorm_gamma_ptr + cols_offsets, mask=mask, other=0.0)
     rnorm_gamma = tl.load(rnorm_gamma_ptr + cols_offsets, mask=mask, other=0.0)
     output_dtype = output_ptr.dtype.element_ty
@@ -178,7 +176,7 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     for row_id in tl.range(
         tl.program_id(0), rows, tl.num_programs(0), num_stages=2
     ):
-        offsets = (row_id * cols + cols_offsets).to(tl.int32)
+        offsets = (row_id * cols + cols_offsets).to(tl.int64)
         hs = tl.load(hidden_states_ptr + offsets, mask=mask, other=0.0)
         onorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, onorm_gamma, cols, eps
