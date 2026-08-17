@@ -234,7 +234,7 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Candidate returned to the accepted R3 band: decode 0.9987-1.0018x and prefill
   1.1815-1.2169x.
 
-### R5 — final Block Size Scaling: 2048 to 4096 (pending)
+### R5 — final Block Size Scaling: 2048 to 4096 (rejected)
 
 - Trigger: the kernel has one statically resolvable one-dimensional
   `BLOCK_SIZE`, is not autotuned, and has no second block dimension.
@@ -247,6 +247,23 @@ frozen baseline, validate correctness first, then compare all target cases.
   authoritative because the wider reduction tree may change FP32 association.
 - Stop rule: stop scaling immediately on compile/verify/correctness failure;
   otherwise benchmark in order and retain only a measured improvement.
+- Correctness: all 12 candidate cases PASS; errors exactly match the 2048
+  baseline/candidate results.
+- Decode: 0.9977-1.0046x versus baseline, with no useful change.
+- Prefill speedups versus baseline for M=4096/8192/9616/16384: 0.8038x /
+  0.9002x / 0.9051x / 0.8997x.  Candidate times were 148.69 / 319.27 /
+  373.34 / 634.38 us.
+- IR impact: no spill, but final IR grows from 59,719 to 65,216 bytes and
+  SET/WAIT counts each rise from 15 to 19.
+- Decision: rejected.  Wider masked lanes increase reduction/synchronization
+  work without reducing grid or GM traffic.
+
+### R6 — final Block Size Scaling: 4096 to 8192 (pending)
+
+- Unique change from R5: double only the candidate launch `BLOCK_SIZE` from
+  4096 to 8192; baseline remains frozen at 2048 and kernel logic is unchanged.
+- Stop rule remains compile/verify/correctness failure; otherwise continue the
+  documented ordered scaling sequence.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
