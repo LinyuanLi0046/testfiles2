@@ -7,9 +7,9 @@ The tensor contract intentionally mirrors the WeLM NPU model call site:
 * residual: contiguous FP32 normalized residual, [M, 2048]
 * onorm/rnorm weights: contiguous BF16 model parameters, [2048]
 * baseline outputs: BF16 normalized hidden, FP32 residual sum, FP32 normalized copy
-* candidate R15 contract: BF16 normalized hidden and FP32 residual sum only;
-  the legacy fp32_out pointer is retained but is not written, and the second
-  RMS consumes the FP32 residual sum without an intervening BF16 round trip
+* candidate R16 contract: BF16 normalized hidden and FP32 residual sum only;
+  the legacy fp32_out pointer is retained but is not written, and both RMS
+  stages remain FP32 internally without either intermediate BF16 round trip
 
 ``baseline`` is a frozen copy of the NEWSGLANG implementation.  Optimization
 rounds must edit only the clearly marked ``candidate`` section.
@@ -199,7 +199,9 @@ def _candidate_mmq_style_norm_after_attn_kernel(
         onorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, onorm_gamma, cols, eps
         )
-        hs = onorm_out.to(hs.dtype)
+        # R16 user-authorized arithmetic relaxation: keep the first RMS result
+        # in FP32 for residual addition instead of rounding it through BF16.
+        hs = onorm_out
         hs += residual
         # R15 user-authorized arithmetic relaxation: hs is already the FP32
         # residual sum, so do not round it through BF16 before the second RMS.
@@ -371,7 +373,7 @@ def candidate_reference_outputs(
     onorm_weight: torch.Tensor,
     rnorm_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """R15: preserve the first BF16 boundary, skip the second RMS input round."""
+    """R16: keep both the first RMS result and second RMS input in FP32."""
     onorm_input = hidden_states.to(onorm_weight.dtype).float()
     onorm_inv_rms = torch.rsqrt(
         torch.sum(onorm_input * onorm_input, dim=-1, keepdim=True)
@@ -379,9 +381,7 @@ def candidate_reference_outputs(
         + EPS
     )
     onorm_fp32 = onorm_input * onorm_inv_rms * onorm_weight.float()
-    onorm_bf16 = onorm_fp32.to(hidden_states.dtype)
-
-    residual_out = onorm_bf16.float() + residual.float()
+    residual_out = onorm_fp32 + residual.float()
     rnorm_input = residual_out.float()
     rnorm_inv_rms = torch.rsqrt(
         torch.sum(rnorm_input * rnorm_input, dim=-1, keepdim=True)
@@ -531,7 +531,7 @@ def run_correctness(
                     "reference_contract": (
                         "strict_production"
                         if provider == "baseline"
-                        else "r15_second_rms_fp32_input"
+                        else "r16_both_rms_intermediates_fp32"
                     ),
                     "max_abs_output_vs_strict": strict_max_errors[0],
                     "max_abs_residual_out_vs_strict": strict_max_errors[1],

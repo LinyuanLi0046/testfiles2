@@ -520,7 +520,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   arithmetic-relaxation rounds.  This is a benchmark contract change, not a
   production-framework integration.
 
-### R15 — skip the second RMS input BF16 round trip (pending)
+### R15 — skip the second RMS input BF16 round trip (provisionally retained)
 
 - Unique kernel change on top of R14: the second RMS consumes the FP32 `hs`
   residual sum directly rather than applying FP32 -> BF16 -> FP32 first.
@@ -531,6 +531,33 @@ frozen baseline, validate correctness first, then compare all target cases.
   quantization boundary changes; output is still stored as BF16.
 - Validation uses an explicit R15 PyTorch reference and separately records
   max/mean drift versus the frozen strict-production reference.
+- Correctness: all 12 candidate cases PASS against the explicit R15 reference;
+  all 12 frozen-baseline cases remain PASS against strict production semantics.
+- Across the tested shapes, max drift versus the strict reference is 0.03125
+  for BF16 `output` and 0.015625 for FP32 `residual_out`.  The latter is almost
+  entirely normal implementation/reference tolerance: maximum per-case mean
+  residual drift is only 6.71e-8.  Maximum per-case mean output drift is
+  0.0011683; M16384 mean output drift is 0.0011261.
+- M16384 Event is 412.263 us versus 571.984 us baseline (1.3874x), and msprof
+  is 373.658 us versus 531.843 us baseline (1.4233x).
+- Incremental versus R14, msprof falls only 377.571 -> 373.658 us (about 1.04%).
+  Mean AIV falls 371.49 -> 365.82 us and Vector falls 194.71 -> 180.42 us,
+  while MTE2 rises 210.84 -> 213.76 us and Scalar rises 46.65 -> 48.50 us.
+- Final IR shrinks from 57,006 to 53,410 bytes, but the MTE2/scalar critical
+  path limits the realized latency gain.
+- Decision: below the standalone 3% gate, so not independently accepted yet;
+  provisionally retained only as the explicitly requested cumulative base for
+  R16.  Final retention is decided from the combined R16 result.
+
+### R16 — skip the first RMS result BF16 round trip (pending)
+
+- Unique kernel change on top of R15: replace `hs = onorm_out.to(BF16)` with
+  `hs = onorm_out`, so residual addition consumes the FP32 first-RMS result.
+- R14's omitted `fp32_out` store and R15's FP32 second-RMS input are unchanged.
+  Both RMS reductions/accumulations remain FP32 and final `output` remains BF16.
+- The FP32 `residual_out` now intentionally follows the unrounded first-RMS
+  result, so both returned tensors are checked against an explicit R16
+  reference and separately measured against strict production semantics.
 - Status: pending remote correctness, precision drift, Event, msprof, IR, and
   pipeline profile.
 
