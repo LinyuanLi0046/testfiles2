@@ -1135,7 +1135,17 @@ def main() -> int:
     if args.capture_msprof_op == "on":
         msprof_cases = list(cases)
     elif args.capture_msprof_op == "auto":
-        msprof_cases = auto_msprof_cases
+        msprof_cases = list(auto_msprof_cases)
+        if standard_run:
+            diagnostic_case = next(
+                item for item in ALL_CASES if item.name == PROFILE_CAPTURE_CASE
+            )
+            if diagnostic_case not in msprof_cases:
+                msprof_cases.append(diagnostic_case)
+                print(
+                    "\nStandard-run diagnostic: forcing msprof op for "
+                    f"{diagnostic_case.name}"
+                )
     else:
         msprof_cases = []
         if auto_msprof_cases:

@@ -270,5 +270,15 @@ frozen baseline, validate correctness first, then compare all target cases.
   2048 because 4096 is slower and 8192 cannot compile.  The accepted R3 load
   reordering at exact-width BLOCK_SIZE=2048 remains the final best candidate.
 
+### D1 — second-stage forced msprof pipeline capture (pending)
+
+- Candidate and frozen baseline code are unchanged from the confirmed R3/2048
+  state; this is measurement instrumentation, not an optimization attempt.
+- Standard `--capture-msprof-op auto` runs additionally select only
+  `prefill_m16384`, profiling baseline and candidate by exact kernel name.
+- Repeated Event records remain authoritative under the >=30 us timing rule;
+  msprof Task Duration and full pipeline/timeline artifacts are diagnostic
+  evidence for a new ordered latency-optimizer scan and IR iteration.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
