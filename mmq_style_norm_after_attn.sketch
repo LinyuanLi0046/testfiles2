@@ -202,7 +202,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   well below the A5 248 KiB capacity.
 - Decision: accepted as the current best candidate.
 
-### R4 — optimization point 30: IR-guided output conversion scheduling (pending)
+### R4 — optimization point 30: IR-guided output conversion scheduling (rejected)
 
 - Unique change: explicitly materialize the final BF16 output conversion before
   starting the residual/fp32/BF16 store sequence.
@@ -216,6 +216,17 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Checklist: grid, grid-stride loop, int64 row addressing, exact 2048-wide block,
   masks, FP32 reductions, and boundary casts are unchanged.  The empirically
   required A5 scheduling/indexing exceptions established by R1/R2 are retained.
+- Correctness: all 12 candidate cases PASS; maximum errors match R3/R0.
+- Timing: repeated NPU Event is authoritative for every case.
+- Decode: 0.9985-1.0024x versus the frozen baseline, indistinguishable from R3.
+- Prefill speedups versus baseline for M=4096/8192/9616/16384: 1.2302x /
+  1.1810x / 1.1914x / 1.1952x.  These remain in R3's run-to-run band and do
+  not establish a >=3% incremental gain.
+- Actual IR impact: the cast moved before the stores, but the compiler inserted
+  an additional MTE3 barrier and more SET/WAIT events; the three stores still
+  require intervening synchronization, and entry IR grew from 234 to 245 lines.
+- Decision: rejected and fully reverted.  The original compiler schedule is the
+  locally efficient form; no further actionable point-30 IR suggestion remains.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
