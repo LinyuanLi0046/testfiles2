@@ -427,7 +427,7 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Correctness: all 24 baseline/candidate records PASS.
 - Candidate returns to R3 at 477.34 us Event and 439.59 us msprof.
 
-### R12 — optimization point 30: BF16 output-first store schedule (pending)
+### R12 — optimization point 30: BF16 output-first store schedule (rejected)
 
 - Unique change: candidate store order becomes output BF16, residual_out FP32,
   fp32_out FP32.  Frozen baseline remains residual_out, fp32_out, output.
@@ -440,9 +440,17 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Function/precision: stored values, dtypes, masks, addresses, store count,
   reductions, and both BF16 rounding boundaries are unchanged.  Return tuple
   order is a Python binding property and is not affected by device store order.
-- Validation gate: require all 12 candidate correctness cases, then compare all
-  Event cases, M16384 msprof MTE3/wait metrics, and final SET/WAIT/store order.
-  Retain only a stable >=3% incremental gain over R3.
+- Correctness: all 12 candidate cases PASS; all 24 records pass and match R3.
+- Performance: decode is neutral and prefill stays in R3's Event band.  M16384
+  msprof is 441.40 us versus the preceding R3 confirmation at 439.59 us, about
+  0.41% slower.
+- IR/profile impact: final IR shrinks from 59,719 to 59,520 bytes and SET/WAIT
+  pairs fall from 15/15 to 13/13.  Mean MTE3 time falls 183.16 -> 89.24 us and
+  MTE3 wait 30.3% -> 12.8%, but MTE2 rises 264.94 -> 268.15 us, scalar rises
+  55.14 -> 57.07 us, and total AIV time rises 430.07 -> 431.16 us.
+- Decision: rejected and fully reverted.  The store order improves the
+  non-critical writeback pipeline but slightly lengthens the MTE2/scalar
+  critical path, so it neither improves latency nor unlocks an MTE2 strategy.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
