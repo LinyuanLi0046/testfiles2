@@ -7,8 +7,9 @@ The tensor contract intentionally mirrors the WeLM NPU model call site:
 * residual: contiguous FP32 normalized residual, [M, 2048]
 * onorm/rnorm weights: contiguous BF16 model parameters, [2048]
 * baseline outputs: BF16 normalized hidden, FP32 residual sum, FP32 normalized copy
-* candidate R14 contract: BF16 normalized hidden and FP32 residual sum only;
-  the legacy fp32_out pointer is retained in the launch ABI but is not written
+* candidate R15 contract: BF16 normalized hidden and FP32 residual sum only;
+  the legacy fp32_out pointer is retained but is not written, and the second
+  RMS consumes the FP32 residual sum without an intervening BF16 round trip
 
 ``baseline`` is a frozen copy of the NEWSGLANG implementation.  Optimization
 rounds must edit only the clearly marked ``candidate`` section.
@@ -156,6 +157,17 @@ def _candidate_do_mmq_rms_norm(hidden, gamma, cols: int, eps: tl.constexpr):
     return out, inv_rms
 
 
+@triton.jit
+def _candidate_do_mmq_rms_norm_fp32_input(
+    hidden, gamma, cols: int, eps: tl.constexpr
+):
+    hidden = hidden.to(tl.float32)
+    inv_rms = tl.math.rsqrt(tl.sum(hidden * hidden, axis=-1) / cols + eps)
+    out = hidden * inv_rms
+    out *= gamma
+    return out, inv_rms
+
+
 @triton.jit(do_not_specialize=["rows"])
 def _candidate_mmq_style_norm_after_attn_kernel(
     hidden_states_ptr: tl.tensor,
@@ -189,7 +201,9 @@ def _candidate_mmq_style_norm_after_attn_kernel(
         )
         hs = onorm_out.to(hs.dtype)
         hs += residual
-        rnorm_out, _ = _candidate_do_mmq_rms_norm(
+        # R15 user-authorized arithmetic relaxation: hs is already the FP32
+        # residual sum, so do not round it through BF16 before the second RMS.
+        rnorm_out, _ = _candidate_do_mmq_rms_norm_fp32_input(
             hs, rnorm_gamma, cols, eps
         )
         tl.store(residual_out_ptr + offsets, hs, mask=mask)
@@ -351,9 +365,42 @@ def reference_outputs(
     return output, residual_out, fp32_out
 
 
+def candidate_reference_outputs(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    onorm_weight: torch.Tensor,
+    rnorm_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """R15: preserve the first BF16 boundary, skip the second RMS input round."""
+    onorm_input = hidden_states.to(onorm_weight.dtype).float()
+    onorm_inv_rms = torch.rsqrt(
+        torch.sum(onorm_input * onorm_input, dim=-1, keepdim=True)
+        / HIDDEN_DIM
+        + EPS
+    )
+    onorm_fp32 = onorm_input * onorm_inv_rms * onorm_weight.float()
+    onorm_bf16 = onorm_fp32.to(hidden_states.dtype)
+
+    residual_out = onorm_bf16.float() + residual.float()
+    rnorm_input = residual_out.float()
+    rnorm_inv_rms = torch.rsqrt(
+        torch.sum(rnorm_input * rnorm_input, dim=-1, keepdim=True)
+        / HIDDEN_DIM
+        + EPS
+    )
+    fp32_out = rnorm_input * rnorm_inv_rms * rnorm_weight.float()
+    output = fp32_out.to(hidden_states.dtype)
+    return output, residual_out
+
+
 def max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
     difference = (actual.float() - expected.float()).abs()
     return float(difference.max().item()) if difference.numel() else 0.0
+
+
+def mean_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    difference = (actual.float() - expected.float()).abs()
+    return float(difference.mean().item()) if difference.numel() else 0.0
 
 
 def writes_fp32_out(provider: str) -> bool:
@@ -398,13 +445,20 @@ def run_correctness(
     for case in cases:
         hidden_states, residual = make_inputs(case, harness.device, harness.seed)
         validate_real_contract(hidden_states, residual, harness)
-        expected = reference_outputs(
+        strict_expected = reference_outputs(
+            hidden_states,
+            residual,
+            harness.onorm_weight,
+            harness.rnorm_weight,
+        )
+        candidate_expected = candidate_reference_outputs(
             hidden_states,
             residual,
             harness.onorm_weight,
             harness.rnorm_weight,
         )
         for provider in PROVIDERS:
+            expected = strict_expected if provider == "baseline" else candidate_expected
             bound = harness.bind(provider, hidden_states, residual)
             bound.launch()
             torch_npu.npu.synchronize()
@@ -445,9 +499,19 @@ def run_correctness(
                 else None
             )
             fp32_error_text = f"{fp32_error:.6g}" if fp32_error is not None else "omitted"
+            strict_max_errors = [
+                max_abs_error(actual[0], strict_expected[0]),
+                max_abs_error(actual[1], strict_expected[1]),
+            ]
+            strict_mean_errors = [
+                mean_abs_error(actual[0], strict_expected[0]),
+                mean_abs_error(actual[1], strict_expected[1]),
+            ]
             print(
                 f"  {case.name:<20} {provider:<10} {status:<4} "
-                f"out={errors[0]:.6g} residual={errors[1]:.6g} fp32={fp32_error_text}"
+                f"out={errors[0]:.6g} residual={errors[1]:.6g} "
+                f"fp32={fp32_error_text} strict_drift="
+                f"({strict_max_errors[0]:.6g},{strict_max_errors[1]:.6g})"
             )
             records.append(
                 {
@@ -464,6 +528,15 @@ def run_correctness(
                     "max_abs_output": errors[0],
                     "max_abs_residual_out": errors[1],
                     "max_abs_fp32_out": fp32_error,
+                    "reference_contract": (
+                        "strict_production"
+                        if provider == "baseline"
+                        else "r15_second_rms_fp32_input"
+                    ),
+                    "max_abs_output_vs_strict": strict_max_errors[0],
+                    "max_abs_residual_out_vs_strict": strict_max_errors[1],
+                    "mean_abs_output_vs_strict": strict_mean_errors[0],
+                    "mean_abs_residual_out_vs_strict": strict_mean_errors[1],
                     "fp32_out_contract": (
                         "written_and_validated"
                         if writes_fp32_out(provider)
@@ -471,7 +544,7 @@ def run_correctness(
                     ),
                 }
             )
-        del expected, hidden_states, residual
+        del strict_expected, candidate_expected, hidden_states, residual
     return records, failures
 
 
