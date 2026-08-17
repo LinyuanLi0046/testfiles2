@@ -199,7 +199,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: None`
 - `ir_has_more_suggestions: false`
 
-### R1 — optimization point 1: constexpr epsilon (awaiting remote result)
+### R1 — optimization point 1: constexpr epsilon (`6c18847`, rejected)
 
 - Hit condition: the timed/model epsilon is fixed at `1e-5`, but R0 keeps it
   as a runtime `f32` kernel argument. Final IR stores that scalar into UB at
@@ -211,5 +211,21 @@ revisit point 18 if the multi-case performance threshold requires it.
   reduction, rounding point, row assignment, and output store are unchanged.
 - Expected IR effect: constant-fold epsilon and remove its runtime kernel
   argument/UB scalar materialization.
+- Correctness: all 26 records PASS with the same per-output error bounds as R0.
+- IR result: expected folding occurred. Candidate entry loses its runtime `f32`
+  epsilon argument and `llvm.store %arg10`; final IR shrinks 44,114 -> 43,832
+  bytes. One outlined vector function also loses the epsilon pointer argument.
+- Performance: decode is consistently 0.5-1.2% slower. Prefill Event is mixed
+  inside roughly +/-0.6%, but authoritative M16384 msprof is 382.450 us versus
+  377.031 us same-run baseline, a 1.42% regression.
+- Decision: rejected and reverted. Constant folding changes code generation but
+  does not reduce the MTE-dominated critical path and makes measured latency
+  worse.
 - `hit_optimization_point: 1`
 - `ir_has_more_suggestions: false`
+
+### R1 rollback confirmation (awaiting remote result)
+
+- Candidate epsilon is restored to runtime `float`; candidate is again exactly
+  identical to the frozen R0 baseline.
+- This confirmation must return to the R0 noise band before point 3 is tested.
