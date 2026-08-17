@@ -178,11 +178,13 @@ def _candidate_mmq_style_norm_after_attn_kernel(
     ):
         offsets = (row_id * cols + cols_offsets).to(tl.int64)
         hs = tl.load(hidden_states_ptr + offsets, mask=mask, other=0.0)
+        # R3 optimization point 11: issue the independent residual read before
+        # the first RMS reduction so MTE2 can overlap with vector compute.
+        residual = tl.load(residual_ptr + offsets, mask=mask, other=0.0)
         onorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, onorm_gamma, cols, eps
         )
         hs = onorm_out.to(hs.dtype)
-        residual = tl.load(residual_ptr + offsets, mask=mask, other=0.0)
         hs += residual
         rnorm_out, _ = _candidate_do_mmq_rms_norm(
             hs, rnorm_gamma, cols, eps

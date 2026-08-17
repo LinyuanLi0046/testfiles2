@@ -177,5 +177,20 @@ frozen baseline, validate correctness first, then compare all target cases.
   i64 row-address expression is required for efficient large-M loop lowering;
   the generic scalar-lowering guidance does not match the observed codegen.
 
+### R2 rollback confirmation (`23099ea`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- Candidate returned to the R0 noise band: decode 0.9979-1.0022x and prefill
+  0.9909-1.0017x.
+
+### R3 — optimization point 11: load reordering (pending remote result)
+
+- Unique change: move the independent FP32 residual load immediately after the
+  BF16 hidden load and before the first RMS reduction.
+- Function/precision: residual is consumed at the identical add point; all
+  arithmetic, casts, reductions, rounding boundaries, and stores are unchanged.
+- Expected IR impact: earlier residual MTE2 issue overlapping the first FP32
+  RMS reduction, with no extra UB value or GM traffic.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
