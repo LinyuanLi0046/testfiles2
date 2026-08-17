@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Poll this repository, benchmark mmq-style norm updates, and push results."""
+"""Poll this repository, benchmark WeLM fused RMSNorm updates, and push results."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ from typing import Sequence
 
 
 REMOTE = "origin"
-BENCHMARK_SCRIPT = "bench_mmq_style_norm_after_attn_npu.py"
-OUTPUT_CSV = "mmq_style_norm_after_attn_all.csv"
-ERROR_LOG = "mmq_style_norm_after_attn_run_error.log"
+BENCHMARK_SCRIPT = "bench_welmv4_fused_rms_norm_npu.py"
+OUTPUT_CSV = "welmv4_fused_rms_norm_all.csv"
+ERROR_LOG = "welmv4_fused_rms_norm_run_error.log"
 DEFAULT_INTERVAL_SECONDS = 60
 AUTO_COMMIT_MARKER = "Auto-Benchmark: true"
 
@@ -211,7 +211,7 @@ def commit_artifacts(branch: str, base_sha: str, succeeded: bool) -> PendingPush
         git("add", "-A", "--", *changed)
         result_word = "success" if succeeded else "failure"
         message = (
-            f"chore: update mmq norm benchmark {result_word}\n\n"
+            f"chore: update WeLM fused RMSNorm benchmark {result_word}\n\n"
             f"Benchmark-Base: {base_sha}\n"
             f"{AUTO_COMMIT_MARKER}"
         )

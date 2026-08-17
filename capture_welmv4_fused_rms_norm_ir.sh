@@ -11,7 +11,7 @@ fi
 shift
 
 PYTHON_BIN="${BENCH_PYTHON:-python}"
-IR_OUTPUT_DIR="${IR_OUTPUT_DIR:-$(pwd)/mmq_style_norm_after_attn_ir}"
+IR_OUTPUT_DIR="${IR_OUTPUT_DIR:-$(pwd)/welmv4_fused_rms_norm_ir}"
 TARGET="${BISHENGIR_TARGET:-Ascend950PR_957b}"
 BISHENGIR_BIN="${BISHENGIR_COMPILE:-}"
 AUTO_MULTI_BUFFER="${BISHENGIR_AUTO_MULTI_BUFFER:-True}"
@@ -24,8 +24,8 @@ if [[ -z "$BISHENGIR_BIN" ]]; then
 fi
 
 mkdir -p "$IR_OUTPUT_DIR"
-RUN_LOG="$(mktemp /tmp/mmq_norm_compile.XXXXXX.log)"
-FULL_IR="$(mktemp /tmp/mmq_norm_bishengir.XXXXXX.log)"
+RUN_LOG="$(mktemp /tmp/welm_rms_norm_compile.XXXXXX.log)"
+FULL_IR="$(mktemp /tmp/welm_rms_norm_bishengir.XXXXXX.log)"
 trap 'rm -f "$RUN_LOG" "$FULL_IR"' EXIT
 
 export TRITON_DEBUG=1
@@ -43,7 +43,7 @@ if [[ -z "$DUMP_DIR" || ! -f "$DUMP_DIR/kernel.ttadapter.mlir" ]]; then
 fi
 
 KERNEL_NAME="$(sed -nE 's/.*(func\.func|tt\.func|module) @([A-Za-z0-9_]+).*/\2/p' "$DUMP_DIR/kernel.ttadapter.mlir" | head -n 1)"
-KERNEL_NAME="${KERNEL_NAME:-candidate_mmq_style_norm_after_attn_kernel}"
+KERNEL_NAME="${KERNEL_NAME:-candidate_rms_norm_kernel}"
 if [[ -f "$DUMP_DIR/kernel.ttir.mlir" ]]; then
     cp "$DUMP_DIR/kernel.ttir.mlir" "$IR_OUTPUT_DIR/${KERNEL_NAME}_ttir.mlir"
 fi

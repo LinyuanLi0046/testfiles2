@@ -1,0 +1,187 @@
+# WelmV4FusedRMSNorm — Ascend A5 optimization sketch
+
+```python
+# @architecture_decision("single-kernel-per-row-rmsnorm", reason="hidden_dim=2048 fits one exact row tile; reduction and apply share the same row data, while a stats/apply split would add a launch and reread the full tensor")
+# @architecture_decision("production-grid-stride-scheduling", reason="R0 must freeze NEWSGLANG's min(M, physical_AIV*8) grid and dynamic grid-stride row loop before any single-point experiment")
+sketch welmv4_fused_rms_norm {
+  symbols: M, N;
+  tensors: hidden_states[M, N]: bf16;
+           residual[M, N]: f32;
+           gamma[N]: bf16;
+           output[M, N]: bf16;
+           residual_out[M, N]: bf16;
+           fp32_out[M, N]: f32;
+  constexpr: N;
+
+  @llm_hint("parallel", "coreidx")
+  for program_id in range(min(M, physical_vector_cores * 8)):
+    gamma_tile = alloc([N], llm_hint=["fast", "input_cache"])
+    load(gamma[0:N] -> gamma_tile)
+
+    @llm_hint("pipeline", "vectorize")
+    for row_id in grid_stride_rows(program_id, M):
+      hidden_tile = alloc([N], llm_hint=["fast", "input_cache"])
+      residual_tile = alloc([N], llm_hint=["fast", "input_cache"])
+      load(hidden_states[row_id, 0:N] -> hidden_tile)
+      load(residual[row_id, 0:N] -> residual_tile)
+
+      add(cast_f32(hidden_tile), residual_tile, hidden_sum_f32)
+
+      # Exact production boundary in _do_rms_norm: gamma is BF16, therefore
+      # the FP32 residual sum is rounded to BF16 before the FP32 reduction.
+      norm_input_f32 = cast_f32(cast_bf16(hidden_sum_f32))
+      square(norm_input_f32, square_f32)
+      reduce_sum(square_f32, axis=0, square_sum_f32)
+      inv_rms_f32 = rsqrt(square_sum_f32 / N + eps)
+      mul(norm_input_f32, inv_rms_f32, normalized_f32)
+      mul(normalized_f32, gamma_tile, normalized_f32)
+
+      store(normalized_f32 -> fp32_out[row_id, 0:N])
+      normalized_bf16 = cast_bf16(normalized_f32)
+      store(normalized_bf16 -> residual_out[row_id, 0:N])
+      store(normalized_bf16 -> output[row_id, 0:N])
+}
+```
+
+## 1. Production contract
+
+Timed call path:
+
+`Welmv4DecoderLayer.forward` → `self.input_layernorm(...)` →
+`WelmV4FusedRMSNorm.forward_npu` → `forward_cuda` → `rms_norm_kernel`.
+
+This workspace targets the PPLN input-norm branch that passes:
+
+- contiguous 2D `hidden_states[M, 2048]` BF16;
+- contiguous 2D `residual[M, 2048]` FP32;
+- contiguous `gamma[2048]` BF16;
+- `eps=1e-5`;
+- `residual_after_layernorm=True`;
+- `clone_fp32_out=True`;
+- BF16 output dtype.
+
+The three returned tensors are:
+
+1. `output`: normalized BF16 hidden states consumed by attention;
+2. `residual_out`: the same normalized BF16 values in this branch;
+3. `fp32_out`: full FP32 normalized values used as the PPLN residual.
+
+Exact arithmetic order:
+
+1. Load BF16 hidden and convert to FP32.
+2. Load FP32 residual and add in FP32.
+3. Round the sum to gamma dtype BF16 inside `_do_rms_norm`.
+4. Convert that BF16 value back to FP32.
+5. Compute `sum(x*x) / 2048`, add epsilon, and apply FP32 `rsqrt`.
+6. Multiply FP32 input by inverse RMS and BF16 gamma.
+7. Store the FP32 result to `fp32_out`.
+8. Convert once to BF16 and store to both `residual_out` and `output`.
+
+No arithmetic relaxation or output omission is authorized for R0.
+
+## 2. Dynamic-shape and specialization contract
+
+Fixed `N=2048` gives `BLOCK_SIZE=2048`. M remains runtime data:
+
+- decode: `1, 2, 4, 8, 16, 32, 64, 128`;
+- prefill: `4096, 8192, 9616, 16361, 16384`.
+
+Production `do_not_specialize` is retained for:
+
+- `rows` (M);
+- `hidden_states_num_kv` (M for the timed 2D layout);
+- `hidden_states_kv_stride` (`M*2048` for the timed 2D layout).
+
+These parameters, token count, batch concurrency, sequence length, and values
+derived from them must not become `tl.constexpr`. The fixed hidden dimension,
+block size, and boolean output mode are valid compile-time specializations.
+
+## 3. Frozen baseline and candidate
+
+`_baseline_do_rms_norm` and `_baseline_rms_norm_kernel` are independent frozen
+copies of NEWSGLANG production code as of 2026-08-17. Candidate helper/kernel
+are initially identical but share no modifiable Triton helper with baseline.
+
+Production host launch reproduced by the harness:
+
+```text
+grid = min(M, physical_vector_cores * 8)
+BLOCK_SIZE = 2048
+hidden_states_row_stride = 2048
+hidden_states_num_kv = M
+hidden_states_kv_stride = M * 2048
+residual_row_stride = 2048
+```
+
+The benchmark times already-bound kernel launches; allocations and tensor
+construction are excluded.
+
+## 4. Correctness and measurement gates
+
+- Every target M validates baseline and candidate against a PyTorch reference
+  that reproduces the BF16 round before the FP32 reduction.
+- Both BF16 outputs and the FP32 copy are checked independently.
+- Candidate failure on any target M rejects the round.
+- Repeated NPU Event measurements alternate provider order.
+- If either provider is below 30 us, both Event results are diagnostics and
+  exact `msprof op` measurements are mandatory.
+- The exact msprof kernel names are `_baseline_rms_norm_kernel` and
+  `_candidate_rms_norm_kernel`.
+- The standard run captures candidate TTIR, TTAdapter, and last-pass BishengIR
+  at M=8192 and forces a large-prefill msprof diagnostic at M=16384.
+- A change below about 3% is treated as noise unless it is a demonstrated
+  prerequisite for a later retained optimization.
+
+## 5. Ordered latency-optimizer scan
+
+Each remote round changes exactly one candidate optimization point, then runs
+the skill checklist before correctness/performance validation. Scan strictly
+in order from point 1 through point 30. For this row-wise fused reduction, the
+high-frequency checks include scalar-to-vector behavior, pass merging, tiling,
+large-block normalization, multi-case kernel splitting, and final IR analysis,
+but none may be attempted out of order.
+
+Initial code-feature inventory for the R0 scan:
+
+1. Fixed `cols`, `BLOCK_SIZE`, and boolean mode are already constexpr; dynamic
+   M-related parameters are intentionally not constexpr.
+2. The reduction axis is contiguous and exactly one 2048-element tile.
+3. Grid is production `min(M, AIV*8)` and must first be measured, not assumed.
+4. There is no data-dependent gather/scatter.
+5. Dynamic row addressing contains integer division/modulo for 2D/3D support.
+6. Row/output address expressions use int64 on selected paths.
+7. One load pass feeds square reduction and normalized apply; no second input
+   GM read occurs inside the kernel.
+8. No three-level continuous-dimension nest exists.
+9. `tl.math.rsqrt` is already used.
+10. Gamma is loaded outside the row loop.
+11. Hidden and residual loads are independent before the reduction.
+12. Decode and prefill may justify separate runtime-dispatched strategies, but
+    dispatch must not specialize on each M.
+13. Tuning candidates must never key autotune on M.
+14. Any mixed strategy must preserve all cases and exact arithmetic.
+15. Hidden dimension is already an exact large reduction block.
+16–17. This is not a pure copy; boundary masks still require IR proof before
+    removal.
+18. There are 13 target cases, so kernel splitting is mandatory to consider if
+    a general candidate remains below the skill threshold.
+19–29. Cube, gather workspace, matmul, pooling, interpolate, and CV-specific
+    points do not match the initial kernel structure.
+30. IR analysis is mandatory after source-level points.
+
+After instruction-level work, execute the skill's Block Size Scaling step, then
+revisit point 18 if the multi-case performance threshold requires it.
+
+## 6. Optimization log
+
+### R0 — workspace migration and frozen equivalence (awaiting remote result)
+
+- Unique change: replace the previous after-attention two-RMS benchmark with
+  the production `WelmV4FusedRMSNorm.rms_norm_kernel` PPLN input-norm path.
+- Baseline and candidate source are intentionally identical.
+- Target set includes all requested decode/prefill M values, including the
+  non-power-of-two prefill case M=16361.
+- Expected result: all 26 correctness records pass and candidate/baseline
+  performance establishes the new operator's measurement noise band.
+- `hit_optimization_point: None`
+- `ir_has_more_suggestions: false`
