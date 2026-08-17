@@ -370,7 +370,7 @@ frozen baseline, validate correctness first, then compare all target cases.
   inconsistent with the stable kernel Task Duration, so it is recorded as a
   noisy rollback sample rather than evidence of a code change.
 
-### R10 — optimization point 30: pure-Vector flatten compile option (pending)
+### R10 — optimization point 30: pure-Vector flatten compile option (rejected)
 
 - Unique change: pass `enable_flatten=True` only when launching the candidate;
   the frozen baseline launch continues to use the compiler default.
@@ -380,9 +380,16 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Function/precision: kernel source, task ownership, int64 addressing, load
   order, both FP32 reductions, two BF16 rounding boundaries, and three output
   stores are unchanged.
-- Validation gate: require all 12 candidate correctness cases, then compare all
-  Event cases, forced M16384 msprof, and exact TTIR/TTAdapter/final-IR hashes.
-  Retain only a stable >=3% incremental gain over R3.
+- Correctness: all 12 candidate cases PASS; all 24 baseline/candidate records
+  pass and errors match R3.
+- Performance: decode is consistently 1.7-2.6% slower.  M16384 msprof rises
+  from the rollback-confirmed R3 value 439.70 to 446.27 us (about 1.50%
+  slower); large-case Event samples are also noisy and show no incremental win.
+- IR impact: none.  TTIR, TTAdapter, and final IR retain their exact R3 sizes
+  and SHA-256 hashes byte-for-byte.
+- Decision: rejected and fully reverted.  `enable_flatten=True` is another no-op
+  for this dynamic grid-stride kernel in the installed compiler, and its timing
+  variation is non-beneficial.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
