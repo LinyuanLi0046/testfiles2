@@ -309,5 +309,25 @@ frozen baseline, validate correctness first, then compare all target cases.
 - Decision: rejected and fully reverted; the smaller scalar path does not
   shorten the pipeline critical path or unlock a synchronization reduction.
 
+### R7 rollback confirmation (`f733630`)
+
+- Correctness: all 24 baseline/candidate records PASS.
+- M16384 returns to the R3 range: Event 478.49 us (1.1970x) and msprof
+  Task Duration 436.12 us (1.2237x).
+
+### R8 — optimization point 30: early residual_out MTE3 store (pending)
+
+- Unique change: move only candidate's FP32 `residual_out` store immediately
+  after `hs += residual`, before the second RMS reduction.
+- Dependency proof: `hs` is final for residual_out at that point; the second
+  RMS reads but never mutates `hs`.  Pointer, mask, dtype, stored value, store
+  count, return order, and both BF16 rounding boundaries are unchanged.
+- IR/profile basis: R3 has about 30% MTE3 wait and delays all three stores until
+  after the second RMS.  A5 has independent V and MTE3 pipelines with compiler
+  SetFlag/WaitFlag dependency injection.
+- Expected impact: start the first MTE3 write as soon as its value is ready and
+  overlap it with the second RMS vector reduction, without extra GM traffic or
+  UB allocation.
+
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
