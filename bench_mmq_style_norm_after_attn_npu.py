@@ -1005,7 +1005,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="all|decode|prefill, a case name, or comma-separated M values",
     )
-    parser.add_argument("--device", default="npu:0")
+    parser.add_argument("--device", default="npu:4")
     parser.add_argument("--seed", type=int, default=20260817)
     parser.add_argument(
         "--scope",

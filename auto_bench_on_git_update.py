@@ -307,7 +307,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="benchmark synchronized HEAD immediately, then keep monitoring",
     )
-    parser.add_argument("--device", default="npu:5")
+    parser.add_argument("--device", default="npu:4")
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error("--interval must be greater than zero")

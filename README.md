@@ -9,7 +9,7 @@ NEWSGLANG checkout on the remote worker.
 From the NPU Python environment in the `testfiles2` repository root, run:
 
 ```bash
-python auto_bench_on_git_update.py --run-now --device npu:5
+python auto_bench_on_git_update.py --run-now --device npu:4
 ```
 
 The process benchmarks the synchronized current HEAD once, then fetches
@@ -21,7 +21,7 @@ python bench_mmq_style_norm_after_attn_npu.py \
   --mode both \
   --cases all \
   --scope kernel \
-  --device npu:5 \
+  --device npu:4 \
   --event-timing on \
   --capture-msprof-op auto \
   --output-csv mmq_style_norm_after_attn_all.csv
@@ -86,7 +86,7 @@ latency, force msprof for only the cases being inspected:
 python bench_mmq_style_norm_after_attn_npu.py \
   --mode performance \
   --cases prefill_m16384 \
-  --device npu:5 \
+  --device npu:4 \
   --capture-msprof-op on \
   --output-csv mmq_style_norm_after_attn_m16384_msprof.csv
 ```
