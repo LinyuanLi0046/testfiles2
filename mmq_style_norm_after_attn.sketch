@@ -1,5 +1,39 @@
 # mmq_style_norm_after_attn — Ascend A5 optimization sketch
 
+```python
+# @architecture_decision("single-fused-row-reduction", reason="两次 RMS 归约具有相同逐行粒度；融合保留中间值并避免额外 GM tensor 与 kernel launch")
+# @architecture_decision("physical-aiv-contiguous-partition", reason="DAV_3510 的 NPU program 不应超额订阅物理 vector core，且每个 task 应处理连续 row chunk")
+sketch mmq_style_norm_after_attn {
+  symbols: M, N;
+  tensors: hidden_states[M, N]: bf16; residual[M, N]: f32;
+           onorm_gamma[N]: bf16; rnorm_gamma[N]: bf16;
+           output[M, N]: bf16; residual_out[M, N]: f32;
+           fp32_out[M, N]: f32;
+  constexpr: N;
+
+  @llm_hint("parallel", "coreidx")
+  for program_id in range(min(M, physical_vector_cores)):
+    onorm_weight = alloc([N], llm_hint=["fast", "input_cache"])
+    rnorm_weight = alloc([N], llm_hint=["fast", "input_cache"])
+    load(onorm_gamma[0:N] -> onorm_weight)
+    load(rnorm_gamma[0:N] -> rnorm_weight)
+
+    @llm_hint("pipeline", "vectorize")
+    for row_id in contiguous_row_chunk(program_id, M):
+      hs_bf16 = alloc([N], llm_hint=["fast", "input_cache"])
+      load(hidden_states[row_id, 0:N] -> hs_bf16)
+      onorm_fp32 = rms_norm_fp32(hs_bf16, onorm_weight, eps)
+      onorm_bf16 = cast_bf16(onorm_fp32)  # mandatory rounding boundary 1
+      load(residual[row_id, 0:N] -> residual_fp32)
+      add(onorm_bf16, residual_fp32, residual_sum_fp32)
+      rnorm_bf16 = cast_bf16(residual_sum_fp32)  # mandatory boundary 2 input
+      rnorm_fp32 = rms_norm_fp32(rnorm_bf16, rnorm_weight, eps)
+      store(residual_sum_fp32 -> residual_out[row_id, 0:N])
+      store(rnorm_fp32 -> fp32_out[row_id, 0:N])
+      store(cast_bf16(rnorm_fp32) -> output[row_id, 0:N])
+}
+```
+
 ## 1. Production contract (must not drift)
 
 Call path:
@@ -37,13 +71,22 @@ program.  A single fused kernel is the baseline architecture because splitting
 the two reductions would materialize another full tensor, add a launch, and
 lose the O-norm/residual producer-consumer locality.
 
-Current host grid matches production:
+Frozen baseline host grid matches production:
 
 `num_programs = min(M, physical_vector_cores * 8)`
 
-The baseline and initial candidate use `num_stages=2` on the dynamic row loop.
-The candidate is intentionally identical at workspace initialization, so R0
-must measure approximately 1.0x and establishes benchmark noise.
+R1 changes only the candidate grid to:
+
+`num_programs = min(M, physical_vector_cores)`
+
+The baseline and candidate both retain `num_stages=2` on the dynamic row loop.
+Each candidate program receives one contiguous row chunk, satisfying the NPU
+task-partition checklist while preserving complete dynamic-M coverage.  Decode
+M<=56 retains one program per row on the measured 56-AIV device; larger decode
+and prefill cases test whether removing the baseline's eightfold NPU program
+oversubscription reduces scheduling overhead without reducing physical-core
+utilization.  Row/column offsets remain int32 because the largest target offset
+is below 2^31; no index precision is lost.
 
 ## 3. Memory and precision budget
 
@@ -84,6 +127,26 @@ frozen baseline, validate correctness first, then compare all target cases.
 4. Change only row assignment/chunk size if IR shows loop/control overhead.
 5. Revisit data-movement/recomputation only when IR identifies redundant UB
    copies; preserve the two BF16 rounding boundaries and all three stores.
+
+## 6. Optimization log
+
+### R0 — frozen-equivalence baseline (`a7355df`)
+
+- Correctness: all 12 cases PASS for both variants and all three outputs.
+- Performance: candidate/baseline speedup ranged from 0.9959x to 1.0017x,
+  establishing an approximately +/-0.4% noise band.
+- Timing: repeated NPU Event is authoritative for all cases because both
+  provider medians were at least 30 us.
+
+### R1 — optimization point 3: vector-core partition (pending remote result)
+
+- Unique change: candidate programs-per-vector-core 8 -> 1.
+- Function: all rows remain covered exactly once via contiguous per-program
+  chunks; the largest target element offset is safe in int32.
+- Precision: kernel arithmetic, FP32 reductions, two BF16 rounding boundaries,
+  and the BF16/FP32/FP32 return stores are unchanged.
+- Expected IR impact: fewer physical program instances for M > physical
+  vector-core count, contiguous row-loop increments, and no i64 offset math.
 
 Reject any candidate with a correctness failure.  Do not retain sub-3% wins
 unless they unlock a larger subsequent change.  Never specialize on M.
