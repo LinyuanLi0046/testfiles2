@@ -261,7 +261,27 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 3`
 - `ir_has_more_suggestions: false`
 
-### R2 rollback confirmation (awaiting remote result)
+### R2 rollback confirmation (`14f12fa`)
 
 - Candidate grid and row loop are restored byte-for-byte to the frozen R0
   production schedule before point 5 is attempted.
+- Correctness: all 26 records PASS.
+- M16384 Event is 426.269 us candidate versus 425.688 us baseline (0.9986x).
+  Same-source msprof is 382.352 versus 378.863 us (0.9909x), demonstrating
+  roughly 1% run/provider noise and reinforcing rejection of R2's +0.60%.
+
+### R3 — optimization point 5: eliminate integer remainder (awaiting remote result)
+
+- Hit condition: the generic hidden-state address path computes both
+  `row_id // hidden_states_num_kv` and `row_id % hidden_states_num_kv`; R0 IR
+  lowers them to separate `llvm.sdiv` and `llvm.srem` scalar operations.
+- Unique change: keep the quotient and replace only the remainder with exact
+  `row_id - kv_idx * hidden_states_num_kv`.
+- Function: for nonnegative row IDs and positive `hidden_states_num_kv`, the
+  identity is exact for every supported 2D/3D layout.
+- Precision: tensor arithmetic, RMS reduction, rounding, and stores are
+  byte-for-byte unchanged; only integer address construction differs.
+- Dynamic M and M-derived values remain unspecialized.
+- Expected IR effect: remove one source-level signed remainder per row.
+- `hit_optimization_point: 5`
+- `ir_has_more_suggestions: false`
