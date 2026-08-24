@@ -632,7 +632,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (Decode multi-row tiling)`
 - `ir_has_more_suggestions: true (per-tile boundary mask remains)`
 
-### R13 — no-mask full multi-row blocks plus one runtime tail (pending result)
+### R13 — no-mask full multi-row blocks plus one runtime tail (`178ca3f`, rejected)
 
 - Unique optimization point: all complete BLOCK_ROWS tiles use unmasked 2D
   loads/stores. Only the final incomplete tile, when runtime `tail_start < M`,
@@ -644,5 +644,23 @@ revisit point 18 if the multi-case performance threshold requires it.
   JIT keys. There is one fixed multi-row kernel per BLOCK_ROWS tiling variant;
   no per-shape compilation is introduced.
 - Arithmetic order and output dtypes are unchanged.
+- A5 correctness passes. Prefill speedups are only 1.4783x/1.4658x/1.4164x/
+  1.3135x/1.3402x; no case reaches 1.50x and M16361 worsens to 286.0 us.
+- Decode is mixed: M56 and M128 rise to 1.201x and 1.259x, but M64 falls to
+  1.097x. This strategy may be revisited as a Decode-only named path.
+- Decision: reject for the shared multi-row kernel and restore R12's masked
+  loop before changing Prefill tiling.
 - `hit_optimization_point: 30 (IR-guided redundant boundary removal)`
-- `ir_has_more_suggestions: pending fresh IR and msprof op`
+- `ir_has_more_suggestions: true (larger Prefill tile remains)`
+
+### R14 — eight-row Prefill tile (pending remote result)
+
+- Unique optimization point from retained R12: Prefill BLOCK_ROWS changes
+  from 4 to 8. Decode remains BLOCK_ROWS=2 with the retained masked loop.
+- Goal: halve Prefill loop/DMA issue count again and increase each regular 2D
+  transfer. Runtime M, masks, arithmetic, grid cap, and output contract remain
+  unchanged.
+- A5 UB risk is explicitly tested. If the compiler reports overflow or any
+  precision failure, the tiling is rejected without relaxing the contract.
+- `hit_optimization_point: 30 (IR-guided larger multi-row tile)`
+- `ir_has_more_suggestions: pending compile, IR, and msprof op`
