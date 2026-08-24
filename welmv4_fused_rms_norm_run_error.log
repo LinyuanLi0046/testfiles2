@@ -1,0 +1,7 @@
+time: 2026-08-24T19:14:45+08:00
+command: /usr/local/python3.11.10/bin/python bench_welmv4_fused_rms_norm_npu.py --mode both --cases all --scope kernel --device npu:1 --event-timing off --capture-msprof-op on --output-csv welmv4_fused_rms_norm_all.csv
+return_code: -6
+reason: benchmark exited with status -6
+
+===== stdout + stderr =====
+python: /usr1/01/workspace/triton-ascend/third_party/ascend/lib/TritonToLinalg/BlockPtrAnalysis.cpp:1772: static std::enable_if_t<std::is_same_v<T, scf::YieldOp> || std::is_same_v<T, scf::ConditionOp>> mlir::triton::BlockDataParser::rewriteTerminator(T, ConversionPatternRewriter &, const llvm::SmallDenseSet<size_t> &, ArrayRef<int64_t>, const llvm::SmallDenseMap<Value, BlockData> &) [T = mlir::scf::YieldOp]: Assertion `(strideVal == 1 || (strideVal == 0 && isSizeOne)) && "attribute strides should be ones"' failed.
