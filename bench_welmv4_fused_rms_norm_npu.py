@@ -421,7 +421,7 @@ class Harness:
                             EPS,
                             BLOCK_SIZE,
                             block_rows,
-                            hfusion_enable_multiple_consumer_fusion=True,
+                            enable_auto_vectorize_v2=True,
                         )
                     return kernel[(num_programs,)](
                         hidden_states,

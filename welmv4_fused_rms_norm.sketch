@@ -708,7 +708,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 18/30 (UB-safe large tile via compile option)`
 - `ir_has_more_suggestions: true (dual-output multiple-consumer fusion)`
 
-### R17 — fuse the FP32 output's two consumers (pending)
+### R17 — fuse the FP32 output's two consumers (`6df767a`, rejected)
 
 - Unique effective optimization point from retained R12: enable
   `hfusion_enable_multiple_consumer_fusion=True` only for the four-row Prefill
@@ -721,5 +721,24 @@ revisit point 18 if the multi-case performance threshold requires it.
   preserving the four-row load/compute/store overlap.
 - The option is one stable Prefill compile strategy. Runtime M remains in
   `do_not_specialize`; no request-derived constexpr or dispatch is added.
+- A5 correctness passes, but TTIR, TTAdapter, and final-IR SHA256 values are
+  byte-for-byte identical to retained R12. Candidate Prefill times are within
+  normal run variation (48.491/116.864/146.092/280.569/285.454 us), so the
+  compiler option did not transform this graph and adds no structural gain.
+- Decision: reject and remove the ineffective option.
 - `hit_optimization_point: 30 (IR-guided multiple-consumer fusion)`
+- `ir_has_more_suggestions: true (AutoVectorizeV2 on the 2D apply chain)`
+
+### R18 — AutoVectorizeV2 for four-row Prefill (pending)
+
+- Unique optimization point from retained R12: enable only
+  `enable_auto_vectorize_v2=True` for the fixed four-row Prefill variant.
+- Motivation: the retained profile still spends substantial AIV time in the
+  vector reduction/apply/cast chain after DMA issue count was reduced. V2 can
+  alter vector fusion/layout independently of the rejected multi-consumer
+  pass, and its effect is verified by fresh IR hashes and msprof counters.
+- Runtime M, masks, four-row tiling, multibuffer, arithmetic order, and output
+  dtypes are unchanged. The option is not request-derived and cannot create
+  per-M compiled variants.
+- `hit_optimization_point: 30 (IR-guided vector pipeline optimization)`
 - `ir_has_more_suggestions: pending compile, IR, and msprof op`
