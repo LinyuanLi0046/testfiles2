@@ -828,7 +828,7 @@ revisit point 18 if the multi-case performance threshold requires it.
   282.868/283.262 us for M4096/8192/9616/16361/16384.
 - Further rounds target Decode only; Prefill is a protected control path.
 
-### R22 — Decode-only unmasked full two-row blocks (pending)
+### R22 — Decode-only unmasked full two-row blocks (`5a9c0e9`, rejected)
 
 - Prefill remains byte-for-byte identical to frozen R12.
 - Unique Decode optimization point: even runtime M>=48 uses a named full-block
@@ -842,4 +842,31 @@ revisit point 18 if the multi-case performance threshold requires it.
   constexpr, so M48/56/64/128 share one compiled full-block variant.
 - Per-row arithmetic, grid, BF16 output, and FP32 output are unchanged.
 - `hit_optimization_point: 30 (Decode boundary-mask elimination)`
+
+- A5 correctness passes all 36 checks, and the frozen Prefill controls remain
+  stable at 48.240/117.416/145.998/282.973/281.186 us.
+- Absolute candidate task times versus the immediately preceding R12 restore
+  are M48 3.449 -> 3.679 us, M56 3.519 -> 3.634 us, M64 3.565 ->
+  3.594 us, and M128 4.454 -> 4.481 us. Removing the masks produces no new
+  material gain and regresses M48/M56.
+- Decision: reject. Remove the named full-block kernel and restore the masked
+  R12 two-row implementation before the next Decode-only experiment.
+
+### R23 — balanced four-row Decode tile for M128 (pending)
+
+- Prefill remains byte-for-byte identical to frozen R12. Decode M1--64 also
+  returns to the retained R12 paths.
+- R22 `PipeUtilization.csv` shows why M128 is distinct: 64 two-row tiles are
+  partitioned over 56 programs, so exactly eight AIVs execute two loop
+  iterations. Those eight AIVs take roughly 3.8 us and determine the task,
+  while the one-iteration AIVs generally take about 2.2--3.1 us.
+- Unique optimization point: M128 reuses the already validated
+  `BLOCK_ROWS=4` multi-row variant with 32 programs. Every program executes
+  one regular `[4, 2048]` tile, removing the 56-to-64 imbalance and combining
+  the critical AIVs' two double-row DMA/reduction iterations into one.
+- This does not add a JIT variant: Prefill already uses the same named kernel
+  with `BLOCK_ROWS=4`; runtime `rows` remains in `do_not_specialize` and only
+  the launch grid changes. No arithmetic, reduction order within a row, dtype,
+  mask contract, or output changes.
+- `hit_optimization_point: 30 (Decode four-row tiling and balanced grid)`
 - `ir_has_more_suggestions: pending accuracy and msprof op`

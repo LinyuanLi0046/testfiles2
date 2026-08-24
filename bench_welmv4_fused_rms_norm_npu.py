@@ -50,7 +50,6 @@ PREFILL_2D_MIN_ROWS = 4096
 DECODE_BLOCK_ROWS = 2
 DECODE_2D_MIN_ROWS = 40
 DECODE_2D_MAX_ROWS = 128
-DECODE_NOMASK_MIN_ROWS = 48
 EPS = 1.0e-5
 MODEL_DTYPE = torch.bfloat16
 RESIDUAL_DTYPE = torch.float32
@@ -274,41 +273,6 @@ def _candidate_multirow_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
 
-@triton.jit(do_not_specialize=["rows"])
-def _candidate_decode_fullblock_rms_norm_kernel(
-    hidden_states_ptr: tl.tensor,
-    reisdual_ptr: tl.tensor,
-    gamma_ptr: tl.tensor,
-    out_ptr: tl.tensor,
-    out_copy_ptr: tl.tensor,
-    rows: int,
-    cols: tl.constexpr,
-    eps: float,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-):
-    program_id = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    num_row_blocks = rows // BLOCK_ROWS
-    block_begin = program_id * num_row_blocks // num_programs
-    block_end = (program_id + 1) * num_row_blocks // num_programs
-    row_lanes = tl.arange(0, BLOCK_ROWS)
-    cols_off = tl.arange(0, BLOCK_SIZE)
-    gamma_shm = tl.load(gamma_ptr + cols_off)
-    output_dtype = out_ptr.dtype.element_ty
-    for block_id in tl.range(block_begin, block_end, num_stages=2):
-        row_ids = block_id * BLOCK_ROWS + row_lanes
-        offsets = row_ids[:, None] * cols + cols_off[None, :]
-        hidden = tl.load(hidden_states_ptr + offsets).to(tl.float32)
-        if reisdual_ptr is not None:
-            residual = tl.load(reisdual_ptr + offsets).to(tl.float32)
-            hidden = hidden + residual
-
-        out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
-        tl.store(out_copy_ptr + offsets, out)
-        tl.store(out_ptr + offsets, out.to(output_dtype))
-
-
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_rms_norm_kernel,
@@ -401,13 +365,13 @@ class Harness:
             provider == "candidate"
             and DECODE_2D_MIN_ROWS <= rows <= DECODE_2D_MAX_ROWS
         )
-        use_decode_fullblock = (
-            use_decode_2d
-            and rows >= DECODE_NOMASK_MIN_ROWS
-            and rows % DECODE_BLOCK_ROWS == 0
-        )
         use_multirow = use_prefill_2d or use_decode_2d
-        block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
+        use_fourrow_decode = use_decode_2d and rows == DECODE_2D_MAX_ROWS
+        block_rows = (
+            PREFILL_BLOCK_ROWS
+            if use_prefill_2d or use_fourrow_decode
+            else DECODE_BLOCK_ROWS
+        )
         if use_multirow:
             num_programs = min(
                 triton.cdiv(rows, block_rows), self.num_vector_cores
@@ -445,9 +409,7 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = None
-            if use_decode_fullblock:
-                kernel = _candidate_decode_fullblock_rms_norm_kernel
-            elif use_multirow:
+            if use_multirow:
                 kernel = _candidate_multirow_rms_norm_kernel
 
             def launch() -> object:
@@ -526,12 +488,6 @@ def logical_bytes_for(case: Case, provider: str) -> int:
 
 
 def kernel_name_for(case: Case, provider: str) -> str:
-    if (
-        provider == "candidate"
-        and DECODE_NOMASK_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
-        and case.rows % DECODE_BLOCK_ROWS == 0
-    ):
-        return "_candidate_decode_fullblock_rms_norm_kernel"
     if provider == "candidate" and (
         case.rows >= PREFILL_2D_MIN_ROWS
         or DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
