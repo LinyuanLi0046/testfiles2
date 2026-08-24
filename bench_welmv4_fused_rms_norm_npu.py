@@ -216,6 +216,32 @@ def _candidate_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype))
 
 
+@triton.jit
+def _candidate_small_rms_norm_kernel(
+    hidden_states_ptr: tl.tensor,
+    reisdual_ptr: tl.tensor,
+    gamma_ptr: tl.tensor,
+    out_ptr: tl.tensor,
+    out_copy_ptr: tl.tensor,
+    cols: tl.constexpr,
+    eps: float,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_id = tl.program_id(0)
+    cols_off = tl.arange(0, BLOCK_SIZE)
+    offsets = row_id * cols + cols_off
+    gamma_shm = tl.load(gamma_ptr + cols_off)
+    output_dtype = out_ptr.dtype.element_ty
+    hidden = tl.load(hidden_states_ptr + offsets).to(tl.float32)
+    if reisdual_ptr is not None:
+        residual = tl.load(reisdual_ptr + offsets).to(tl.float32)
+        hidden = hidden + residual
+
+    out = _candidate_do_rms_norm(hidden, gamma_shm, cols, eps)
+    tl.store(out_copy_ptr + offsets, out)
+    tl.store(out_ptr + offsets, out.to(output_dtype))
+
+
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_rms_norm_kernel,
@@ -335,19 +361,35 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = None
+            if rows <= self.num_vector_cores:
+                kernel = _candidate_small_rms_norm_kernel
 
-            def launch() -> object:
-                return kernel[(num_programs,)](
-                    hidden_states,
-                    residual,
-                    self.weight,
-                    output,
-                    fp32_out,
-                    rows,
-                    HIDDEN_DIM,
-                    EPS,
-                    BLOCK_SIZE,
-                )
+                def launch() -> object:
+                    return kernel[(num_programs,)](
+                        hidden_states,
+                        residual,
+                        self.weight,
+                        output,
+                        fp32_out,
+                        HIDDEN_DIM,
+                        EPS,
+                        BLOCK_SIZE,
+                    )
+
+            else:
+
+                def launch() -> object:
+                    return kernel[(num_programs,)](
+                        hidden_states,
+                        residual,
+                        self.weight,
+                        output,
+                        fp32_out,
+                        rows,
+                        HIDDEN_DIM,
+                        EPS,
+                        BLOCK_SIZE,
+                    )
 
         else:
             raise ValueError(f"unknown provider: {provider}")
@@ -396,6 +438,12 @@ def logical_bytes_for(case: Case, provider: str) -> int:
     # Main tensors only. Baseline writes two BF16 copies; candidate writes one.
     bytes_per_element = 14 if provider == "baseline" else 12
     return case.rows * HIDDEN_DIM * bytes_per_element
+
+
+def kernel_name_for(case: Case, provider: str, num_vector_cores: int) -> str:
+    if provider == "candidate" and case.rows <= num_vector_cores:
+        return "_candidate_small_rms_norm_kernel"
+    return f"_{provider}_rms_norm_kernel"
 
 
 def case_fields(case: Case) -> dict[str, object]:
@@ -857,7 +905,9 @@ def capture_msprof_op_records(
     for case in cases:
         case_name = case.name
         for provider in PROVIDERS:
-            kernel_name = f"_{provider}_rms_norm_kernel"
+            kernel_name = kernel_name_for(
+                case, provider, harness.num_vector_cores
+            )
             common = {
                 **harness.metadata(),
                 **case_fields(case),

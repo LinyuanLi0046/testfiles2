@@ -411,7 +411,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - The loop-free kernel and host dispatch are removed. Candidate is restored
   to the frozen R0 source before checking point 13.
 
-### R6 — dominant `True + True` two-output specialization (pending remote result)
+### R6 — dominant `True + True` two-output specialization (`8a70f64`, retained)
 
 - Contract specialization, before resuming latency-optimizer point 13: remove
   only candidate `out_residual_ptr`, its allocation, and its duplicate BF16
@@ -429,4 +429,37 @@ revisit point 18 if the multi-case performance threshold requires it.
   (14.3%) by eliminating one 2-byte BF16 write. At M=16384, N=2048 this avoids
   a 64 MiB allocation/write per affected layer call.
 - `hit_optimization_point: contract specialization (pre-point-13)`
-- `ir_has_more_suggestions: pending remote TTIR/TTAdapter/BishengIR`
+- A5 authoritative `msprof op` correctness: all 26 provider/case checks pass.
+  Candidate BF16 maximum absolute error is at most 0.015625 and FP32 maximum
+  absolute error is at most 1.431e-6, identical to the frozen arithmetic
+  contract within the configured tolerances.
+- A5 authoritative `msprof op` Prefill p50: M4096 71.072 -> 66.782 us
+  (1.0642x), M8192 170.707 -> 155.265 us (1.0995x), M9616 206.857 ->
+  185.989 us (1.1122x), M16361 377.971 -> 342.969 us (1.1021x), and
+  M16384 376.878 -> 348.429 us (1.0816x).
+- Per-AIV profiling confirms the expected mechanism. At M16384, write traffic
+  falls from 4681.1 to 3510.9 KiB, scalar time from 48.082 to 36.853 us, MTE2
+  from 271.039 to 253.224 us, and MTE3 from 141.723 to 134.542 us, while
+  vector time is essentially unchanged (109.646 vs 109.326 us).
+- Decode is mixed: M8/M16/M32 improve, while M1/M2/M4/M64/M128 regress. This
+  shape-dependent fixed-overhead behavior triggers optimization point 14.
+- Point 13 is not hit: `cols=BLOCK_SIZE=2048` is the fixed model contract, and
+  making runtime M a tuning key is forbidden because it would reintroduce
+  shape-derived JIT variants. `rows` remains in `do_not_specialize`.
+- `hit_optimization_point: contract specialization (pre-point-13)`
+- `ir_has_more_suggestions: true (small-M fixed overhead and final IR divisions)`
+
+### R7 — optimization point 14: mixed small/large strategy (pending remote result)
+
+- Unique optimization point: when runtime `M <= physical_AIV`, Host dispatches
+  to a loop-free two-output candidate with exactly one row per program. It
+  removes the two balanced-interval integer divisions and the dynamic row loop.
+- For `M > physical_AIV`, including every Prefill case, the retained R6 kernel
+  and its launch grid are byte-for-byte unchanged.
+- The new small kernel has no M argument at all: runtime M is used only by Host
+  dispatch/grid selection, never as `tl.constexpr` or a JIT cache-key value.
+- Both paths preserve FP32 residual addition, BF16 rounding before reduction,
+  FP32 square/reduction/rsqrt/gamma multiply, and the FP32/BF16 stores.
+- Grid remains one-dimensional and never exceeds the physical AIV count.
+- `hit_optimization_point: 14`
+- `ir_has_more_suggestions: pending remote msprof op and compiler IR`
