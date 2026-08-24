@@ -57,7 +57,7 @@ this otherwise easy-to-miss production rounding boundary.
 
 `hidden_dim=2048` is fixed. Dynamic M coverage is:
 
-- decode: `1, 2, 4, 8, 16, 32, 64, 128`;
+- decode: `1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 128`;
 - prefill: `4096, 8192, 9616, 16361, 16384`.
 
 The frozen baseline retains the production dynamic kv parameters. The

@@ -92,7 +92,7 @@ in this branch.
 
 Fixed `N=2048` gives `BLOCK_SIZE=2048`. M remains runtime data:
 
-- decode: `1, 2, 4, 8, 16, 32, 64, 128`;
+- decode: `1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 128`;
 - prefill: `4096, 8192, 9616, 16361, 16384`.
 
 The frozen baseline retains production `do_not_specialize` for `rows`,
@@ -449,7 +449,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: contract specialization (pre-point-13)`
 - `ir_has_more_suggestions: true (small-M fixed overhead and final IR divisions)`
 
-### R7 — optimization point 14: mixed small/large strategy (pending remote result)
+### R7 — optimization point 14: mixed small/large strategy (`e2672ba`, rejected)
 
 - Unique optimization point: when runtime `M <= physical_AIV`, Host dispatches
   to a loop-free two-output candidate with exactly one row per program. It
@@ -461,5 +461,53 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Both paths preserve FP32 residual addition, BF16 rounding before reduction,
   FP32 square/reduction/rsqrt/gamma multiply, and the FP32/BF16 stores.
 - Grid remains one-dimensional and never exceeds the physical AIV count.
+- A5 authoritative `msprof op` candidate/baseline speedups are: M1 1.0099x,
+  M2 1.0173x, M4 0.9428x, M8 0.9918x, M16 1.0195x, and M32 0.9907x.
+  No small-path shape clears the 3% retention threshold, and M4 regresses 5.7%.
+- Unchanged-path controls remain within ordinary run noise at M64 0.9929x and
+  M128 1.0095x. Prefill retains R6's material gains: 1.0560x to 1.1270x.
+- Decision: rejected. The mixed small kernel and its Host dispatch are removed;
+  the candidate returns to the single R6 two-output kernel for every M.
 - `hit_optimization_point: 14`
-- `ir_has_more_suggestions: pending remote msprof op and compiler IR`
+- `ir_has_more_suggestions: true (continue ordered scan at point 15)`
+
+### R7 rollback confirmation
+
+- Candidate source is restored to the retained R6 two-output kernel before
+  inspecting optimization point 15. AST comparison against `8a70f64` confirms
+  both candidate JIT functions are identical; a redundant remote run is skipped.
+
+### Ordered checks after R7
+
+- Point 15, dimension merge and large-BLOCK accumulation: not hit. Each row is
+  one independent stats unit with one full-coverage N=2048 vector load/reduce;
+  there is no stats-unit nested loop, low-coverage mask, or scalar accumulation.
+- Point 16, continuous copy aggregation: not hit; this is a fused reduction.
+- Point 17, redundant boundary operations: not hit; the R6 candidate has no
+  boundary masks or redundant `where`/mask arithmetic.
+- Point 18, kernel splitting: no new viable group. Every case has the same
+  reduce-last N=2048 and dtype contract; the only small/large grouping was R7
+  and was rejected by authoritative measurements.
+- Points 19-29 are not applicable: there is no Cube, dot, gather, workspace,
+  atomic scatter, default-output fill, interpolation, pooling, matmul, or CV
+  pipeline in this pure Vector RMSNorm.
+
+### R8 — optimization point 30: explicit A5 multibuffer (pending remote result)
+
+- Latest R6 IR is analyzed at TTIR, TTAdapter, and final BishengIR. It contains
+  the expected three loads/two stores and a single row pipeline. TTAdapter has
+  `tt.num_stages=2`, but final IR exposes no automatic multibuffer annotation.
+- A5 documentation states that 910_95/950 defaults `multibuffer=False`.
+  Profiling corroborates a memory bottleneck: at M16384 per-AIV MTE2 is
+  253.224 us versus 109.326 us Vector, while R6 has already removed the only
+  redundant output write.
+- Unique optimization point: pass only `multibuffer=True` to the candidate
+  launch so the compiler can overlap the next row's GM load with current-row
+  Vector reduction/store. Baseline stays frozen.
+- Kernel source, `tl.range(num_stages=2)`, row partition, grid, BLOCK, BF16
+  rounding point, FP32 reduction order, and both stores are unchanged.
+- This compiler option is shape-independent. All M values remain runtime
+  values in `do_not_specialize`; the new decode M12/24/40/48/56 cases expand
+  validation coverage without creating shape-derived constexpr parameters.
+- `hit_optimization_point: 30 (IR-guided revisit of multibuffer)`
+- `ir_has_more_suggestions: pending fresh remote IR`
