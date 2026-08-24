@@ -559,7 +559,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - All ordered latency-skill points and the IR-guided follow-up suggestions have
   been checked. Rejected branches are removed from executable source.
 
-### R10 — IR-guided 4-row Prefill tile (pending remote result)
+### R10 — IR-guided 4-row Prefill tile (`3080331`, retained)
 
 - The 30% target reopens IR iteration. R6 executes about 293 row-loop
   iterations per AIV at M16384, issuing separate hidden/residual loads and
@@ -575,7 +575,15 @@ revisit point 18 if the multi-case performance threshold requires it.
   disabled. No arithmetic order changes within a row: FP32 residual add, BF16
   rounding, FP32 reduction/rsqrt/gamma, and both output dtypes are preserved.
 - `hit_optimization_point: 30 (IR-guided multi-row tiling)`
-- `ir_has_more_suggestions: pending fresh remote IR`
+- A5 correctness: all 36 records PASS.
+- Authoritative Prefill speedups are M4096 1.4464x, M8192 1.4775x,
+  M9616 1.4165x, M16361 1.3305x, and M16384 1.3293x. Every Prefill case
+  clears the per-shape 30% target.
+- At M16384, mean per-AIV MTE2 instruction count falls 1758 -> 442 and MTE3
+  586 -> 147, almost exactly one quarter. Scalar time falls 36.9 -> 10.7 us;
+  Task Duration falls from the R6 range near 350 us to 283.4 us.
+- Decision: retained. The four-row kernel is now the protected Prefill path.
+- `ir_has_more_suggestions: true (Decode still misses the 30% target)`
 
 ### R10 compile fix (`8baf663` failure)
 
@@ -585,3 +593,18 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Fix only broadcasting: use a 2D helper with `inv_rms[:, None]` and
   `gamma[None, :]`. Per-row FP32 reduction, rsqrt, multiply order, dtypes,
   tiling, masks, and launch grid are unchanged.
+
+### R11 — Decode-only A5 SIMT path (pending remote result)
+
+- R10 Prefill remains byte-for-byte unchanged. Only the one-row Decode
+  candidate launch uses `compile_mode="simt_only"`.
+- Motivation from M1 msprof: Task is 3.02 us while AIV active is 1.73 us;
+  Scalar is 0.556 us and Vector wait ratio is 61.6%. The workload is too small
+  to fill 56 SIMD AIVs and is not HBM-bandwidth-bound.
+- SIMT is an A5/950-specific alternative intended to reduce control and tiny
+  vector-task overhead. The tensor arithmetic, grid, runtime rows, exact
+  N=2048, and two outputs are unchanged.
+- Compile mode is fixed for the named Decode kernel and independent of M;
+  `rows` remains in `do_not_specialize`.
+- `hit_optimization_point: 30 (A5 Decode SIMT specialization)`
+- `ir_has_more_suggestions: pending all-decode msprof op`

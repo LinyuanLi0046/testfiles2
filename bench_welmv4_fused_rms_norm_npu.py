@@ -422,6 +422,7 @@ class Harness:
                     HIDDEN_DIM,
                     EPS,
                     BLOCK_SIZE,
+                    compile_mode="simt_only",
                 )
 
         else:
