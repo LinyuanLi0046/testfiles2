@@ -576,3 +576,12 @@ revisit point 18 if the multi-case performance threshold requires it.
   rounding, FP32 reduction/rsqrt/gamma, and both output dtypes are preserved.
 - `hit_optimization_point: 30 (IR-guided multi-row tiling)`
 - `ir_has_more_suggestions: pending fresh remote IR`
+
+### R10 compile fix (`8baf663` failure)
+
+- Remote compilation fails before execution: reducing `[4,2048]` on the last
+  axis returns `[4]`; the one-row helper's implicit multiply aligns that 4 to
+  the 2048 tail dimension and reports incompatible dimensions.
+- Fix only broadcasting: use a 2D helper with `inv_rms[:, None]` and
+  `gamma[None, :]`. Per-row FP32 reduction, rsqrt, multiply order, dtypes,
+  tiling, masks, and launch grid are unchanged.

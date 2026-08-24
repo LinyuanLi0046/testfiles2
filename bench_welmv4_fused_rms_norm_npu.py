@@ -190,6 +190,15 @@ def _candidate_do_rms_norm(hidden, gamma, cols: int, eps: tl.constexpr):
     return out
 
 
+@triton.jit
+def _candidate_do_rms_norm_2d(hidden, gamma, cols: int, eps: tl.constexpr):
+    hidden = hidden.to(gamma.dtype).to(tl.float32)
+    inv_rms = tl.math.rsqrt(tl.sum(hidden * hidden, axis=-1) / cols + eps)
+    out = hidden * inv_rms[:, None]
+    out *= gamma[None, :]
+    return out
+
+
 @triton.jit(do_not_specialize=["rows"])
 def _candidate_rms_norm_kernel(
     hidden_states_ptr: tl.tensor,
@@ -256,7 +265,7 @@ def _candidate_prefill_4row_rms_norm_kernel(
             ).to(tl.float32)
             hidden = hidden + residual
 
-        out = _candidate_do_rms_norm(hidden, gamma_shm, cols, eps)
+        out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
         tl.store(out_copy_ptr + offsets, out, mask=mask)
         tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
