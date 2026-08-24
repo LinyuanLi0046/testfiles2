@@ -3,23 +3,24 @@
 ```python
 # @architecture_decision("single-kernel-per-row-rmsnorm", reason="hidden_dim=2048 fits one exact row tile; reduction and apply share the same row data, while a stats/apply split would add a launch and reread the full tensor")
 # @architecture_decision("production-grid-stride-scheduling", reason="R0 must freeze NEWSGLANG's min(M, physical_AIV*8) grid and dynamic grid-stride row loop before any single-point experiment")
+# @architecture_decision("dominant-true-true-two-output-specialization", reason="the model discards residual_out when residual_after_layernorm=True and clone_fp32_out=True; removing only that duplicate BF16 allocation/store preserves the two consumed tensors and exact arithmetic while reducing GM write traffic")
+# @architecture_decision("candidate-balanced-contiguous-AIV-partition", reason="the dedicated contiguous-2D candidate uses at most the physical vector-core count and assigns each program a balanced contiguous row interval, eliminating interleaved scheduling, modulo, and int64 linear addresses")
 sketch welmv4_fused_rms_norm {
   symbols: M, N;
   tensors: hidden_states[M, N]: bf16;
            residual[M, N]: f32;
            gamma[N]: bf16;
            output[M, N]: bf16;
-           residual_out[M, N]: bf16;
            fp32_out[M, N]: f32;
   constexpr: N;
 
   @llm_hint("parallel", "coreidx")
-  for program_id in range(min(M, physical_vector_cores * 8)):
+  for program_id in range(min(M, physical_vector_cores)):
     gamma_tile = alloc([N], llm_hint=["fast", "input_cache"])
     load(gamma[0:N] -> gamma_tile)
 
     @llm_hint("pipeline", "vectorize")
-    for row_id in grid_stride_rows(program_id, M):
+    for row_id in balanced_contiguous_rows(program_id, M):
       hidden_tile = alloc([N], llm_hint=["fast", "input_cache"])
       residual_tile = alloc([N], llm_hint=["fast", "input_cache"])
       load(hidden_states[row_id, 0:N] -> hidden_tile)
@@ -38,7 +39,6 @@ sketch welmv4_fused_rms_norm {
 
       store(normalized_f32 -> fp32_out[row_id, 0:N])
       normalized_bf16 = cast_bf16(normalized_f32)
-      store(normalized_bf16 -> residual_out[row_id, 0:N])
       store(normalized_bf16 -> output[row_id, 0:N])
 }
 ```
@@ -60,11 +60,18 @@ This workspace targets the PPLN input-norm branch that passes:
 - `clone_fp32_out=True`;
 - BF16 output dtype.
 
-The three returned tensors are:
+The generic production kernel materializes three tensors:
 
 1. `output`: normalized BF16 hidden states consumed by attention;
 2. `residual_out`: the same normalized BF16 values in this branch;
 3. `fp32_out`: full FP32 normalized values used as the PPLN residual.
+
+For the dominant `True + True` model call, Python discards item 2 immediately.
+The specialized candidate therefore returns only the two consumed tensors:
+
+1. `output`: normalized BF16 hidden states consumed by attention;
+2. `fp32_out`: the exact same full FP32 normalized values used as the next
+   PPLN residual.
 
 Exact arithmetic order:
 
@@ -75,9 +82,11 @@ Exact arithmetic order:
 5. Compute `sum(x*x) / 2048`, add epsilon, and apply FP32 `rsqrt`.
 6. Multiply FP32 input by inverse RMS and BF16 gamma.
 7. Store the FP32 result to `fp32_out`.
-8. Convert once to BF16 and store to both `residual_out` and `output`.
+8. Convert once to BF16 and store to `output`.
 
-No arithmetic relaxation or output omission is authorized for R0.
+No arithmetic relaxation is authorized. The only omitted work is the
+duplicate BF16 `residual_out` allocation/store that the model does not consume
+in this branch.
 
 ## 2. Dynamic-shape and specialization contract
 
@@ -86,31 +95,31 @@ Fixed `N=2048` gives `BLOCK_SIZE=2048`. M remains runtime data:
 - decode: `1, 2, 4, 8, 16, 32, 64, 128`;
 - prefill: `4096, 8192, 9616, 16361, 16384`.
 
-Production `do_not_specialize` is retained for:
+The frozen baseline retains production `do_not_specialize` for `rows`,
+`hidden_states_num_kv`, and `hidden_states_kv_stride`. The contiguous-2D
+candidate removes the two M-derived kv arguments entirely and keeps only
+`rows` in `do_not_specialize`.
 
-- `rows` (M);
-- `hidden_states_num_kv` (M for the timed 2D layout);
-- `hidden_states_kv_stride` (`M*2048` for the timed 2D layout).
-
-These parameters, token count, batch concurrency, sequence length, and values
-derived from them must not become `tl.constexpr`. The fixed hidden dimension,
-block size, and boolean output mode are valid compile-time specializations.
+Token count, batch concurrency, sequence length, and values derived from them
+must not become `tl.constexpr`. The fixed hidden dimension and block size are
+valid compile-time specializations; the candidate has no shape-derived boolean
+mode.
 
 ## 3. Frozen baseline and candidate
 
 `_baseline_do_rms_norm` and `_baseline_rms_norm_kernel` are independent frozen
-copies of NEWSGLANG production code as of 2026-08-17. Candidate helper/kernel
-are initially identical but share no modifiable Triton helper with baseline.
+copies of NEWSGLANG production code as of 2026-08-17 and retain all three
+outputs. The candidate is the dominant-branch specialization and exposes only
+the two model-consumed outputs; it shares no modifiable Triton helper with the
+baseline.
 
-Production host launch reproduced by the harness:
+Host launches reproduced by the harness:
 
 ```text
-grid = min(M, physical_vector_cores * 8)
+baseline grid = min(M, physical_vector_cores * 8)
+candidate grid = min(M, physical_vector_cores)
+candidate row interval = [program_id*M/grid, (program_id+1)*M/grid)
 BLOCK_SIZE = 2048
-hidden_states_row_stride = 2048
-hidden_states_num_kv = M
-hidden_states_kv_stride = M * 2048
-residual_row_stride = 2048
 ```
 
 The benchmark times already-bound kernel launches; allocations and tensor
@@ -120,7 +129,8 @@ construction are excluded.
 
 - Every target M validates baseline and candidate against a PyTorch reference
   that reproduces the BF16 round before the FP32 reduction.
-- Both BF16 outputs and the FP32 copy are checked independently.
+- Baseline checks all three generic outputs. Candidate independently checks
+  its BF16 attention output and FP32 residual output.
 - Candidate failure on any target M rejects the round.
 - Repeated NPU Event measurements alternate provider order.
 - If either provider is below 30 us, both Event results are diagnostics and
@@ -400,3 +410,23 @@ revisit point 18 if the multi-case performance threshold requires it.
 
 - The loop-free kernel and host dispatch are removed. Candidate is restored
   to the frozen R0 source before checking point 13.
+
+### R6 — dominant `True + True` two-output specialization (pending remote result)
+
+- Contract specialization, before resuming latency-optimizer point 13: remove
+  only candidate `out_residual_ptr`, its allocation, and its duplicate BF16
+  store. The frozen three-output baseline is unchanged.
+- Exact FP32 residual addition, BF16 gamma-dtype rounding boundary, FP32 square
+  reduction/rsqrt, gamma multiplication, FP32 store, and BF16 output store are
+  unchanged and remain in the same order.
+- `rows` stays a runtime value in `do_not_specialize`. Candidate M-derived kv
+  and stride arguments are removed rather than specialized, so no
+  M/token/sequence-derived value is added to the JIT cache key.
+- Checklist compliance for the new dedicated kernel: grid is at most the
+  physical AIV count; rows are balanced contiguous intervals; dense 2D offsets
+  need neither modulo nor int64; exact N=BLOCK_SIZE removes boundary masks.
+- Expected effect: main-tensor traffic falls from 14 to 12 bytes per element
+  (14.3%) by eliminating one 2-byte BF16 write. At M=16384, N=2048 this avoids
+  a 64 MiB allocation/write per affected layer call.
+- `hit_optimization_point: contract specialization (pre-point-13)`
+- `ir_has_more_suggestions: pending remote TTIR/TTAdapter/BishengIR`

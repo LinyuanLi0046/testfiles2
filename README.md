@@ -23,8 +23,8 @@ python bench_welmv4_fused_rms_norm_npu.py \
   --cases all \
   --scope kernel \
   --device npu:4 \
-  --event-timing on \
-  --capture-msprof-op auto \
+  --event-timing off \
+  --capture-msprof-op on \
   --output-csv welmv4_fused_rms_norm_all.csv
 ```
 
@@ -44,8 +44,11 @@ The performance path mirrors the WeLM PPLN input-layer norm call:
 - `eps=1e-5`;
 - `residual_after_layernorm=True`;
 - `clone_fp32_out=True`;
-- outputs: BF16 normalized output, BF16 normalized residual copy, and the full
-  FP32 normalized copy used as the next PPLN residual.
+- frozen baseline outputs: BF16 normalized output, its duplicate BF16 residual
+  copy, and the full FP32 normalized copy;
+- specialized candidate outputs: BF16 normalized output and the full FP32
+  normalized copy used as the next PPLN residual. The discarded duplicate BF16
+  output is neither allocated nor written.
 
 The kernel first adds hidden and residual in FP32. `_do_rms_norm` then rounds
 that sum to the BF16 gamma dtype before converting back to FP32 for the square
@@ -57,17 +60,17 @@ this otherwise easy-to-miss production rounding boundary.
 - decode: `1, 2, 4, 8, 16, 32, 64, 128`;
 - prefill: `4096, 8192, 9616, 16361, 16384`.
 
-`rows`, `hidden_states_num_kv`, and `hidden_states_kv_stride` retain the
-production `do_not_specialize` contract. M and values derived from M must not
-become compile-time constants during optimization.
+The frozen baseline retains the production dynamic kv parameters. The
+contiguous-2D candidate removes M-derived kv/stride arguments and keeps `rows`
+in `do_not_specialize`. M and values derived from M must not become compile-time
+constants during optimization.
 
 ## Measurement and diagnostics
 
-All cases are first timed with alternating repeated NPU Events. If either
-provider is below 30 us, both Event rows become non-authoritative diagnostics
-and exact `msprof op` `Task Duration(us)` measurements are required. Larger
-cases retain Event timing, while the standard run always forces an M=16384
-msprof capture for a stable large-prefill diagnostic.
+The automatic run measures every decode and prefill shape with exact `msprof op`
+`Task Duration(us)` and selects each provider by its explicit kernel name.
+NPU Event timing remains available only as an opt-in diagnostic for manual
+experiments; it is never authoritative in the automatic optimization loop.
 
 The standard run stores the following record types in one CSV:
 

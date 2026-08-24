@@ -8,12 +8,15 @@ The timed contract is the production PPLN input-norm call of
 * residual: contiguous FP32, [M, 2048]
 * gamma: contiguous BF16 model parameter, [2048]
 * residual_after_layernorm=True and clone_fp32_out=True
-* outputs: BF16 normalized hidden, BF16 normalized residual copy, and the
-  normalized FP32 copy consumed as the next PPLN residual
+* frozen baseline outputs: BF16 normalized hidden, a duplicate BF16 normalized
+  residual copy, and the normalized FP32 copy consumed as the next residual
+* specialized candidate outputs: only the consumed BF16 normalized hidden and
+  normalized FP32 residual
 
-``baseline`` and ``candidate`` are independent copies of the current
-NEWSGLANG implementation.  Future optimization rounds may edit only the
-clearly marked candidate section and must preserve this arithmetic contract.
+``baseline`` is a frozen copy of the current NEWSGLANG implementation.
+``candidate`` specializes the dominant ``True + True`` branch by removing only
+the discarded BF16 copy. Future optimization rounds may edit only the clearly
+marked candidate section and must preserve the arithmetic contract.
 """
 
 from __future__ import annotations
@@ -182,68 +185,35 @@ def _candidate_do_rms_norm(hidden, gamma, cols: int, eps: tl.constexpr):
     return out
 
 
-@triton.jit(
-    do_not_specialize=[
-        "rows",
-        "hidden_states_num_kv",
-        "hidden_states_kv_stride",
-    ]
-)
+@triton.jit(do_not_specialize=["rows"])
 def _candidate_rms_norm_kernel(
     hidden_states_ptr: tl.tensor,
     reisdual_ptr: tl.tensor,
     gamma_ptr: tl.tensor,
     out_ptr: tl.tensor,
-    out_residual_ptr: tl.tensor,
     out_copy_ptr: tl.tensor,
     rows: int,
     cols: tl.constexpr,
     eps: float,
-    hidden_states_row_stride: int,
-    hidden_states_num_kv: int,
-    hidden_states_kv_stride: int,
-    residual_row_stride: int,
-    residual_after_layernorm: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    row_start = tl.program_id(0)
+    program_id = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    row_begin = program_id * rows // num_programs
+    row_end = (program_id + 1) * rows // num_programs
     cols_off = tl.arange(0, BLOCK_SIZE)
-    mask = cols_off < cols
-    gamma_shm = tl.load(gamma_ptr + cols_off, mask=mask, other=0.0)
+    gamma_shm = tl.load(gamma_ptr + cols_off)
     output_dtype = out_ptr.dtype.element_ty
-    for row_id in tl.range(
-        row_start, rows, tl.num_programs(0), num_stages=2
-    ):
-        kv_idx = row_id // hidden_states_num_kv
-        row_idx = row_id % hidden_states_num_kv
-        kv_off = kv_idx * hidden_states_kv_stride
-        h_offs = row_idx * hidden_states_row_stride + kv_off + cols_off
-        r_offs = (row_id * residual_row_stride + cols_off).to(tl.int64)
-        h = tl.load(hidden_states_ptr + h_offs, mask=mask, other=0.0).to(
-            tl.float32
-        )
+    for row_id in tl.range(row_begin, row_end, num_stages=2):
+        offsets = row_id * cols + cols_off
+        hidden = tl.load(hidden_states_ptr + offsets).to(tl.float32)
         if reisdual_ptr is not None:
-            r = tl.load(reisdual_ptr + r_offs, mask=mask, other=0.0).to(
-                tl.float32
-            )
-            h = h + r
+            residual = tl.load(reisdual_ptr + offsets).to(tl.float32)
+            hidden = hidden + residual
 
-        output_offs = (row_id * cols + cols_off).to(tl.int64)
-        if not residual_after_layernorm and out_residual_ptr is not None:
-            tl.store(
-                out_residual_ptr + output_offs,
-                h.to(reisdual_ptr.dtype.element_ty),
-                mask=mask,
-            )
-
-        out = _candidate_do_rms_norm(h, gamma_shm, cols, eps)
-        if out_copy_ptr is not None:
-            tl.store(out_copy_ptr + output_offs, out, mask=mask)
-
-        out = out.to(output_dtype)
-        if residual_after_layernorm:
-            tl.store(out_residual_ptr + output_offs, out, mask=mask)
-        tl.store(out_ptr + output_offs, out, mask=mask)
+        out = _candidate_do_rms_norm(hidden, gamma_shm, cols, eps)
+        tl.store(out_copy_ptr + offsets, out)
+        tl.store(out_ptr + offsets, out.to(output_dtype))
 
 
 PROVIDERS = {
@@ -256,7 +226,7 @@ PROVIDERS = {
 class BoundLaunch:
     launch: Callable[[], object]
     output: torch.Tensor
-    residual_out: torch.Tensor
+    residual_out: torch.Tensor | None
     fp32_out: torch.Tensor
 
 
@@ -332,29 +302,55 @@ class Harness:
         if cols != HIDDEN_DIM:
             raise ValueError(f"expected hidden_dim={HIDDEN_DIM}, got {cols}")
         output = torch.empty_like(hidden_states)
-        residual_out = torch.empty_like(hidden_states)
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
-        num_programs = min(rows, self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE)
+        num_programs = min(
+            rows,
+            self.num_vector_cores
+            if provider == "candidate"
+            else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
+        )
         kernel = PROVIDERS[provider]
 
-        def launch() -> object:
-            return kernel[(num_programs,)](
-                hidden_states,
-                residual,
-                self.weight,
-                output,
-                residual_out,
-                fp32_out,
-                rows,
-                HIDDEN_DIM,
-                EPS,
-                hidden_states.stride(-2),
-                hidden_states.shape[-2],
-                hidden_states.numel(),
-                residual.stride(0),
-                True,
-                BLOCK_SIZE,
-            )
+        if provider == "baseline":
+            residual_out: torch.Tensor | None = torch.empty_like(hidden_states)
+
+            def launch() -> object:
+                return kernel[(num_programs,)](
+                    hidden_states,
+                    residual,
+                    self.weight,
+                    output,
+                    residual_out,
+                    fp32_out,
+                    rows,
+                    HIDDEN_DIM,
+                    EPS,
+                    hidden_states.stride(-2),
+                    hidden_states.shape[-2],
+                    hidden_states.numel(),
+                    residual.stride(0),
+                    True,
+                    BLOCK_SIZE,
+                )
+
+        elif provider == "candidate":
+            residual_out = None
+
+            def launch() -> object:
+                return kernel[(num_programs,)](
+                    hidden_states,
+                    residual,
+                    self.weight,
+                    output,
+                    fp32_out,
+                    rows,
+                    HIDDEN_DIM,
+                    EPS,
+                    BLOCK_SIZE,
+                )
+
+        else:
+            raise ValueError(f"unknown provider: {provider}")
 
         return BoundLaunch(launch, output, residual_out, fp32_out)
 
@@ -397,9 +393,8 @@ def max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 def logical_bytes_for(case: Case, provider: str) -> int:
-    del provider
-    # hidden BF16 + residual FP32 + gamma BF16 + two BF16 outputs + FP32 copy.
-    bytes_per_element = 2 + 4 + 2 + 2 + 2 + 4
+    # Main tensors only. Baseline writes two BF16 copies; candidate writes one.
+    bytes_per_element = 14 if provider == "baseline" else 12
     return case.rows * HIDDEN_DIM * bytes_per_element
 
 
@@ -442,38 +437,50 @@ def run_correctness(
             bound = harness.bind(provider, hidden_states, residual)
             bound.launch()
             torch_npu.npu.synchronize()
-            actual = (bound.output, bound.residual_out, bound.fp32_out)
             status = "PASS"
             detail = ""
             try:
                 torch.testing.assert_close(
-                    actual[0], expected[0], atol=OUTPUT_ATOL, rtol=OUTPUT_RTOL
+                    bound.output, expected[0], atol=OUTPUT_ATOL, rtol=OUTPUT_RTOL
                 )
+                if provider == "baseline":
+                    if bound.residual_out is None:
+                        raise AssertionError("baseline residual_out is missing")
+                    torch.testing.assert_close(
+                        bound.residual_out,
+                        expected[1],
+                        atol=OUTPUT_ATOL,
+                        rtol=OUTPUT_RTOL,
+                    )
+                elif bound.residual_out is not None:
+                    raise AssertionError("candidate must not allocate residual_out")
                 torch.testing.assert_close(
-                    actual[1], expected[1], atol=OUTPUT_ATOL, rtol=OUTPUT_RTOL
+                    bound.fp32_out, expected[2], atol=FP32_ATOL, rtol=FP32_RTOL
                 )
-                torch.testing.assert_close(
-                    actual[2], expected[2], atol=FP32_ATOL, rtol=FP32_RTOL
-                )
-                if actual[0].dtype != MODEL_DTYPE:
-                    raise AssertionError(f"output dtype is {actual[0].dtype}")
-                if actual[1].dtype != MODEL_DTYPE:
-                    raise AssertionError("residual_out must be BF16")
-                if actual[2].dtype != torch.float32:
+                if bound.output.dtype != MODEL_DTYPE:
+                    raise AssertionError(f"output dtype is {bound.output.dtype}")
+                if bound.residual_out is not None and bound.residual_out.dtype != MODEL_DTYPE:
+                    raise AssertionError("baseline residual_out must be BF16")
+                if bound.fp32_out.dtype != torch.float32:
                     raise AssertionError("fp32_out must be FP32")
             except AssertionError as exc:
                 status = "FAIL"
                 detail = str(exc).replace("\n", " | ")
                 failures += 1
-            errors = [
-                max_abs_error(actual[0], expected[0]),
-                max_abs_error(actual[1], expected[1]),
-                max_abs_error(actual[2], expected[2]),
-            ]
+            output_error = max_abs_error(bound.output, expected[0])
+            residual_error = (
+                max_abs_error(bound.residual_out, expected[1])
+                if bound.residual_out is not None
+                else None
+            )
+            fp32_error = max_abs_error(bound.fp32_out, expected[2])
+            residual_text = (
+                f"{residual_error:.6g}" if residual_error is not None else "omitted"
+            )
             print(
                 f"  {case.name:<20} {provider:<10} {status:<4} "
-                f"out={errors[0]:.6g} residual={errors[1]:.6g} "
-                f"fp32={errors[2]:.6g}"
+                f"out={output_error:.6g} residual={residual_text} "
+                f"fp32={fp32_error:.6g}"
             )
             records.append(
                 {
@@ -487,11 +494,16 @@ def run_correctness(
                     "output_rtol": OUTPUT_RTOL,
                     "fp32_atol": FP32_ATOL,
                     "fp32_rtol": FP32_RTOL,
-                    "max_abs_output": errors[0],
-                    "max_abs_residual_out": errors[1],
-                    "max_abs_fp32_out": errors[2],
+                    "max_abs_output": output_error,
+                    "max_abs_residual_out": residual_error,
+                    "max_abs_fp32_out": fp32_error,
                     "reference_contract": "strict_production_ppln_input_norm",
                     "fp32_out_contract": "written_and_validated",
+                    "residual_out_contract": (
+                        "materialized_and_validated"
+                        if provider == "baseline"
+                        else "omitted"
+                    ),
                 }
             )
         del expected, hidden_states, residual
@@ -1132,6 +1144,17 @@ def main() -> int:
         raise ValueError(f"--device must select an NPU, got: {device}")
     torch_npu.npu.set_device(0 if device.index is None else device.index)
     cases = parse_cases(args.cases)
+    standard_run = (
+        Path(args.output_csv).name == AUTO_OUTPUT_CSV
+        and args.mode == "both"
+        and args.cases.strip().lower() in ("all", "common")
+    )
+    if standard_run:
+        # A long-running monitor does not reload its own Python definitions
+        # after git pull. Enforce authoritative all-shape timing in the freshly
+        # launched benchmark even when an older monitor passes legacy flags.
+        args.event_timing = "off"
+        args.capture_msprof_op = "on"
     harness = Harness(device, args.seed)
     print("WeLM WelmV4FusedRMSNorm Ascend A5 study")
     print(
@@ -1140,7 +1163,8 @@ def main() -> int:
     )
     print(
         "shape: [M, 2048], hidden/weight=BF16, residual=FP32, "
-        "outputs=(BF16, BF16, FP32), path=PPLN input norm"
+        "baseline_outputs=(BF16, BF16, FP32), candidate_outputs=(BF16, FP32), "
+        "path=PPLN input norm"
     )
     if args.compile_only_provider:
         if len(cases) != 1:
@@ -1179,11 +1203,6 @@ def main() -> int:
             )
             records.extend(event_records)
 
-    standard_run = (
-        Path(args.output_csv).name == AUTO_OUTPUT_CSV
-        and args.mode == "both"
-        and args.cases.strip().lower() in ("all", "common")
-    )
     capture_ir = args.capture_ir == "on" or (
         args.capture_ir == "auto" and standard_run
     )
@@ -1221,7 +1240,9 @@ def main() -> int:
             harness,
             str(device),
             msprof_cases,
-            capture_all_artifacts=args.capture_msprof_op == "on",
+            capture_all_artifacts=(
+                args.capture_msprof_op == "on" and not standard_run
+            ),
         )
         records.extend(msprof_records)
         if measurement_failures:
