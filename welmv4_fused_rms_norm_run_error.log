@@ -1,11 +1,11 @@
-time: 2026-08-24T18:25:26+08:00
+time: 2026-08-24T18:28:55+08:00
 command: /usr/local/python3.11.10/bin/python bench_welmv4_fused_rms_norm_npu.py --mode both --cases all --scope kernel --device npu:1 --event-timing off --capture-msprof-op on --output-csv welmv4_fused_rms_norm_all.csv
 return_code: 1
 reason: benchmark exited with status 1
 
 ===== stdout + stderr =====
 WeLM WelmV4FusedRMSNorm Ascend A5 study
-device=npu:1 (Ascend950PR_957b), physical_AIV=56, commit=642c3dd05c13
+device=npu:1 (Ascend950PR_957b), physical_AIV=56, commit=6e4d2b26a671
 shape: [M, 2048], hidden/weight=BF16, residual=FP32, baseline_outputs=(BF16, BF16, FP32), candidate_outputs=(BF16, FP32), path=PPLN input norm
 
 Correctness (real WeLM PPLN input-norm contract):
@@ -48,20 +48,20 @@ Traceback (most recent call last):
           ^^^^^^^^^^^^^^^
   File "/usr/local/python3.11.10/lib/python3.11/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
-subprocess.CalledProcessError: Command '['/usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/bishengir/bin/bishengir-compile', '/tmp/tmpmklyi3kh/kernel.ttadapter.mlir', '--target=Ascend950PR_957b', '--enable-auto-multi-buffer=True', '--enable-auto-bind-sub-block=True', '--disable-ffts', '--limit-auto-multi-buffer-of-local-buffer=no-limit', '--enable-auto-blockify-loop', '--enable-hfusion-compile=true', '--enable-triton-kernel-compile=true', '--append-bisheng-options=-cce-link-aicore-ll-module /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/lib/libdevice.10.bc', '--mlir-print-ir-after-failure', '--mlir-print-stacktrace-on-diagnostic', '-o', '/tmp/tmpmklyi3kh/kernel', '--enable-vf-merge-level=1']' returned non-zero exit status 1.
+subprocess.CalledProcessError: Command '['/usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/bishengir/bin/bishengir-compile', '/tmp/tmpc8pi9454/kernel.ttadapter.mlir', '--target=Ascend950PR_957b', '--enable-auto-multi-buffer=True', '--enable-auto-bind-sub-block=True', '--disable-ffts', '--limit-auto-multi-buffer-of-local-buffer=no-limit', '--enable-auto-blockify-loop', '--enable-hfusion-compile=true', '--enable-triton-kernel-compile=true', '--append-bisheng-options=-cce-link-aicore-ll-module /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/lib/libdevice.10.bc', '--mlir-print-ir-after-failure', '--mlir-print-stacktrace-on-diagnostic', '-o', '/tmp/tmpc8pi9454/kernel', '--enable-vf-merge-level=1']' returned non-zero exit status 1.
 
 The above exception was the direct cause of the following exception:
 
 Traceback (most recent call last):
-  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 1356, in <module>
+  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 1365, in <module>
     raise SystemExit(main())
                      ^^^^^^
-  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 1273, in main
+  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 1282, in main
     correctness_records, failures = run_correctness(harness, cases)
                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 531, in run_correctness
+  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 540, in run_correctness
     bound.launch()
-  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 412, in launch
+  File "/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py", line 420, in launch
     return kernel[(num_programs,)](
            ^^^^^^^^^^^^^^^^^^^^^^^^
   File "/usr/local/python3.11.10/lib/python3.11/site-packages/triton/runtime/jit.py", line 333, in <lambda>
@@ -284,7 +284,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
         %collapse_shape_24 = memref.collapse_shape %subview_22 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1]>, #hivm.address_space<ub>> into memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>
         %collapse_shape_25 = memref.collapse_shape %subview_23 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1], offset: ?>, #hivm.address_space<gm>> into memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>
         hivm.hir.store ins(%collapse_shape_24 : memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>) outs(%collapse_shape_25 : memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>)
-      } {tt.num_stages = 2 : i32}
+      } {tt.num_stages = 1 : i32}
       hivm.hir.set_ctrl true at ctrl[60]
     } {autoblockify.subloop}
     return
@@ -498,7 +498,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
         %collapse_shape_24 = memref.collapse_shape %subview_22 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1]>, #hivm.address_space<ub>> into memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>
         %collapse_shape_25 = memref.collapse_shape %subview_23 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1], offset: ?>, #hivm.address_space<gm>> into memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>
         hivm.hir.store ins(%collapse_shape_24 : memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>) outs(%collapse_shape_25 : memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>)
-      } {tt.num_stages = 2 : i32}
+      } {tt.num_stages = 1 : i32}
       hivm.hir.set_ctrl true at ctrl[60]
     } {autoblockify.subloop}
     return
@@ -712,7 +712,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
         %collapse_shape_24 = memref.collapse_shape %subview_22 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1]>, #hivm.address_space<ub>> into memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>
         %collapse_shape_25 = memref.collapse_shape %subview_23 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1], offset: ?>, #hivm.address_space<gm>> into memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>
         hivm.hir.store ins(%collapse_shape_24 : memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>) outs(%collapse_shape_25 : memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>)
-      } {tt.num_stages = 2 : i32}
+      } {tt.num_stages = 1 : i32}
       hivm.hir.set_ctrl true at ctrl[60]
     } {autoblockify.subloop}
     return
@@ -926,7 +926,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
         %collapse_shape_24 = memref.collapse_shape %subview_22 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1]>, #hivm.address_space<ub>> into memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>
         %collapse_shape_25 = memref.collapse_shape %subview_23 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1], offset: ?>, #hivm.address_space<gm>> into memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>
         hivm.hir.store ins(%collapse_shape_24 : memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>) outs(%collapse_shape_25 : memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>)
-      } {tt.num_stages = 2 : i32}
+      } {tt.num_stages = 1 : i32}
       hivm.hir.set_ctrl true at ctrl[60]
     } {autoblockify.subloop}
     return
@@ -1140,7 +1140,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
         %collapse_shape_24 = memref.collapse_shape %subview_22 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1]>, #hivm.address_space<ub>> into memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>
         %collapse_shape_25 = memref.collapse_shape %subview_23 [[0, 1]] : memref<?x2048xbf16, strided<[2048, 1], offset: ?>, #hivm.address_space<gm>> into memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>
         hivm.hir.store ins(%collapse_shape_24 : memref<?xbf16, strided<[1]>, #hivm.address_space<ub>>) outs(%collapse_shape_25 : memref<?xbf16, strided<[1], offset: ?>, #hivm.address_space<gm>>)
-      } {tt.num_stages = 2 : i32}
+      } {tt.num_stages = 1 : i32}
       hivm.hir.set_ctrl true at ctrl[60]
     } {autoblockify.subloop}
     return
@@ -1148,21 +1148,21 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 }
 
 
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: Failed to run buildFinalHIVMPipelines pipeline
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: Failed to run buildFinalHIVMPipelines pipeline
 
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: Failed to run buildFinalHIVMPipelines pipeline
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: Failed to run buildFinalHIVMPipelines pipeline
 
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: Failed to run buildFinalHIVMPipelines pipeline
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: Failed to run buildFinalHIVMPipelines pipeline
 
-loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":237:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
+loc("/data2/hw_lly/testfiles2/bench_welmv4_fused_rms_norm_npu.py":239:0): error: ub overflow, requires 3211520 bits while 2031616 bits available!
 [ERROR] Failed to run BiShengIR pipeline
-[ERROR] Executing: /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/bishengir/bin/bishengir-compile-a5 /tmp/tmpmklyi3kh/kernel.ttadapter.mlir --target=Ascend950PR_957b --enable-auto-multi-buffer=True --enable-auto-bind-sub-block=True --disable-ffts --limit-auto-multi-buffer-of-local-buffer=no-limit --enable-auto-blockify-loop --enable-hfusion-compile=true --enable-triton-kernel-compile=true --append-bisheng-options=-cce-link-aicore-ll-module /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/lib/libdevice.10.bc --mlir-print-ir-after-failure --mlir-print-stacktrace-on-diagnostic -o /tmp/tmpmklyi3kh/kernel --enable-vf-merge-level=1
+[ERROR] Executing: /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/bishengir/bin/bishengir-compile-a5 /tmp/tmpc8pi9454/kernel.ttadapter.mlir --target=Ascend950PR_957b --enable-auto-multi-buffer=True --enable-auto-bind-sub-block=True --disable-ffts --limit-auto-multi-buffer-of-local-buffer=no-limit --enable-auto-blockify-loop --enable-hfusion-compile=true --enable-triton-kernel-compile=true --append-bisheng-options=-cce-link-aicore-ll-module /usr/local/python3.11.10/lib/python3.11/site-packages/triton/backends/ascend/lib/libdevice.10.bc --mlir-print-ir-after-failure --mlir-print-stacktrace-on-diagnostic -o /tmp/tmpc8pi9454/kernel --enable-vf-merge-level=1
 
 
-[INFO]: The compiled kernel cache is in /root/.triton/cache/Oa3-WhuSYO0ZKl2mcLNe71NLYCb0ShZ0SUElT_1yt6I
+[INFO]: The compiled kernel cache is in /root/.triton/cache/KEwMHdWjRFarNia-iM53IIKEN7msuFAOpyfzVxgggRA
 
 ///------------------[ERROR][Triton][END]------------------
 
-[ERROR] 2026-08-24-18:25:24 (PID:449196, Device:1, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+[ERROR] 2026-08-24-18:28:53 (PID:449579, Device:1, RankID:-1) ERR99999 UNKNOWN applicaiton exception
