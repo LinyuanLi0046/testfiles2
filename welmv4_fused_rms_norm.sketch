@@ -594,7 +594,7 @@ revisit point 18 if the multi-case performance threshold requires it.
   `gamma[None, :]`. Per-row FP32 reduction, rsqrt, multiply order, dtypes,
   tiling, masks, and launch grid are unchanged.
 
-### R11 — Decode-only A5 SIMT path (pending remote result)
+### R11 — Decode-only A5 SIMT path (`154f4cc`, rejected)
 
 - R10 Prefill remains byte-for-byte unchanged. Only the one-row Decode
   candidate launch uses `compile_mode="simt_only"`.
@@ -606,5 +606,23 @@ revisit point 18 if the multi-case performance threshold requires it.
   N=2048, and two outputs are unchanged.
 - Compile mode is fixed for the named Decode kernel and independent of M;
   `rows` remains in `do_not_specialize`.
+- A5 correctness passes, but every Decode shape regresses severely. Candidate
+  Task Duration grows from 4.204 us at M1 to 8.738 us at M128; speedups range
+  only 0.578x to 0.748x.
+- Prefill controls remain at 1.325x to 1.531x, proving the protected R10 path
+  is unaffected.
+- Decision: reject and remove `compile_mode="simt_only"`.
 - `hit_optimization_point: 30 (A5 Decode SIMT specialization)`
+- `ir_has_more_suggestions: true (multi-row Decode group remains)`
+
+### R12 — two-row Decode tile for M40-128 (pending remote result)
+
+- Unique optimization point: M40/48/56/64/128 use the retained multi-row
+  kernel with `BLOCK_ROWS=2`; M1-32 return to the R6 one-row SIMD kernel.
+- Grid remains at 20/24/28/32/56 programs respectively, while load/store and
+  loop issue count per program is aggregated across two contiguous rows.
+- Prefill continues to use the same multi-row source with BLOCK_ROWS=4 and is
+  otherwise unchanged. Runtime M stays in `do_not_specialize`; BLOCK_ROWS is a
+  fixed tiling choice with only two stable compiled variants.
+- `hit_optimization_point: 30 (Decode multi-row tiling)`
 - `ir_has_more_suggestions: pending all-decode msprof op`

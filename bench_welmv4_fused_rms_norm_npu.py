@@ -47,6 +47,9 @@ HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
 PREFILL_BLOCK_ROWS = 4
 PREFILL_2D_MIN_ROWS = 4096
+DECODE_BLOCK_ROWS = 2
+DECODE_2D_MIN_ROWS = 40
+DECODE_2D_MAX_ROWS = 128
 EPS = 1.0e-5
 MODEL_DTYPE = torch.bfloat16
 RESIDUAL_DTYPE = torch.float32
@@ -231,7 +234,7 @@ def _candidate_rms_norm_kernel(
 
 
 @triton.jit(do_not_specialize=["rows"])
-def _candidate_prefill_4row_rms_norm_kernel(
+def _candidate_multirow_rms_norm_kernel(
     hidden_states_ptr: tl.tensor,
     reisdual_ptr: tl.tensor,
     gamma_ptr: tl.tensor,
@@ -358,9 +361,15 @@ class Harness:
         output = torch.empty_like(hidden_states)
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
         use_prefill_2d = provider == "candidate" and rows >= PREFILL_2D_MIN_ROWS
-        if use_prefill_2d:
+        use_decode_2d = (
+            provider == "candidate"
+            and DECODE_2D_MIN_ROWS <= rows <= DECODE_2D_MAX_ROWS
+        )
+        use_multirow = use_prefill_2d or use_decode_2d
+        block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
+        if use_multirow:
             num_programs = min(
-                triton.cdiv(rows, PREFILL_BLOCK_ROWS), self.num_vector_cores
+                triton.cdiv(rows, block_rows), self.num_vector_cores
             )
         else:
             num_programs = min(
@@ -395,11 +404,11 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = None
-            if use_prefill_2d:
-                kernel = _candidate_prefill_4row_rms_norm_kernel
+            if use_multirow:
+                kernel = _candidate_multirow_rms_norm_kernel
 
             def launch() -> object:
-                if use_prefill_2d:
+                if use_multirow:
                     return kernel[(num_programs,)](
                         hidden_states,
                         residual,
@@ -410,7 +419,7 @@ class Harness:
                         HIDDEN_DIM,
                         EPS,
                         BLOCK_SIZE,
-                        PREFILL_BLOCK_ROWS,
+                        block_rows,
                     )
                 return kernel[(num_programs,)](
                     hidden_states,
@@ -422,7 +431,6 @@ class Harness:
                     HIDDEN_DIM,
                     EPS,
                     BLOCK_SIZE,
-                    compile_mode="simt_only",
                 )
 
         else:
@@ -475,8 +483,11 @@ def logical_bytes_for(case: Case, provider: str) -> int:
 
 
 def kernel_name_for(case: Case, provider: str) -> str:
-    if provider == "candidate" and case.rows >= PREFILL_2D_MIN_ROWS:
-        return "_candidate_prefill_4row_rms_norm_kernel"
+    if provider == "candidate" and (
+        case.rows >= PREFILL_2D_MIN_ROWS
+        or DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
+    ):
+        return "_candidate_multirow_rms_norm_kernel"
     return f"_{provider}_rms_norm_kernel"
 
 
