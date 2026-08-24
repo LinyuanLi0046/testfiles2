@@ -523,7 +523,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (IR-guided revisit of multibuffer)`
 - `ir_has_more_suggestions: true (pure-Vector flatten option remains untested)`
 
-### R9 — optimization point 30: explicit pure-Vector flatten (pending remote result)
+### R9 — optimization point 30: explicit pure-Vector flatten (`21f8382`, rejected)
 
 - A5 compiler guidance recommends `enable_flatten=True` for pure Vector
   kernels. The candidate is a row loop containing only GM loads, Vector
@@ -536,5 +536,25 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Expected IR effect: flatten/canonicalize the per-program row loop so the
   backend may simplify scheduling and reduce loop-control overhead while
   preserving one independent RMS reduction per row.
+- A5 correctness: all 36 records PASS.
+- TTIR, TTAdapter, and final BishengIR hashes are all exactly identical to R8;
+  final device code again has SHA256 `1cabcc08...10b2`. The option produces no
+  compiler transformation for this kernel/toolchain.
+- Candidate Prefill p50 is 67.098/154.388/183.456/343.715/350.758 us. Relative
+  to the retained R6 control run, all differences are about +/-1%; no shape
+  clears the 3% retention threshold. Decode measurements are launch-overhead
+  dominated and mixed, while generated device code is identical.
+- Decision: rejected. Remove `enable_flatten=True`; retain R6 two-output source
+  and the expanded M12/24/40/48/56 decode validation matrix.
 - `hit_optimization_point: 30 (IR-guided pure-Vector flatten)`
-- `ir_has_more_suggestions: pending fresh remote IR`
+- `ir_has_more_suggestions: false`
+
+### Final retained candidate
+
+- R6 is the retained implementation: one dynamic-M, physical-AIV, balanced
+  contiguous-row kernel producing only consumed BF16 normalized hidden and
+  FP32 normalized residual outputs.
+- No shape/token-derived value is constexpr. `rows` remains covered by
+  `do_not_specialize`; N=2048 and BLOCK=2048 are fixed model-contract values.
+- All ordered latency-skill points and the IR-guided follow-up suggestions have
+  been checked. Rejected branches are removed from executable source.
