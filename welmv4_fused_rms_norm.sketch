@@ -791,7 +791,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 18/30 (paired manual selective buffering)`
 - `ir_has_more_suggestions: true (split the reduction's column axis)`
 
-### R21 — eight rows with two fixed 1024-column reduction halves (pending)
+### R21 — eight rows with two fixed 1024-column reduction halves (`9695d1a`, rejected)
 
 - Unique algorithmic point: a dedicated Prefill kernel keeps BLOCK_ROWS=8 but
   splits fixed N=2048 into two 1024-column halves. Each half performs the same
@@ -809,5 +809,21 @@ revisit point 18 if the multi-case performance threshold requires it.
   `do_not_specialize`. BLOCK_ROWS=8, BLOCK_COLS=1024, and N=2048 are fixed
   model/tiling constants, never request-derived values.
 - Decode returns byte-for-byte to the retained R12 two-row generic kernel.
+- A5 correctness passes all 36 records, but Prefill speedups are only
+  1.3626x/1.4002x/1.3918x/1.3041x/1.3265x. Every shape is slower than the
+  retained four-row path, so the smaller FP32 working width does not recover
+  the overlap lost by disabling automatic multibuffer.
+- Decision: reject and remove the dedicated split-column kernel.
 - `hit_optimization_point: 18/30 (column tiling and partial reduction)`
-- `ir_has_more_suggestions: pending compile, UB, precision, and msprof op`
+- `ir_has_more_suggestions: false for the current Prefill optimization phase`
+
+### Prefill freeze after R21
+
+- Per user direction, stop Prefill optimization when R21 shows no clear gain.
+- Restore the verified R12 four-row implementation. R12, R17, and R18 have
+  identical TTIR/TTAdapter/final-IR hashes; the later compile switches were
+  proven no-ops. This path keeps runtime M in `do_not_specialize`, one stable
+  kernel strategy, full dynamic tail masking, and 36/36 reference accuracy.
+- The retained representative R12 task times are 48.678/118.133/146.135/
+  282.868/283.262 us for M4096/8192/9616/16361/16384.
+- Further rounds target Decode only; Prefill is a protected control path.

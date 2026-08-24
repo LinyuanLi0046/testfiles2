@@ -45,8 +45,7 @@ import triton.language as tl
 
 HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
-PREFILL_BLOCK_ROWS = 8
-PREFILL_BLOCK_COLS = 1024
+PREFILL_BLOCK_ROWS = 4
 PREFILL_2D_MIN_ROWS = 4096
 DECODE_BLOCK_ROWS = 2
 DECODE_2D_MIN_ROWS = 40
@@ -274,88 +273,6 @@ def _candidate_multirow_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
 
-@triton.jit(do_not_specialize=["rows"])
-def _candidate_splitcol_prefill_rms_norm_kernel(
-    hidden_states_ptr: tl.tensor,
-    reisdual_ptr: tl.tensor,
-    gamma_ptr: tl.tensor,
-    out_ptr: tl.tensor,
-    out_copy_ptr: tl.tensor,
-    rows: int,
-    cols: tl.constexpr,
-    eps: float,
-    BLOCK_ROWS: tl.constexpr,
-    BLOCK_COLS: tl.constexpr,
-):
-    program_id = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    num_row_blocks = tl.cdiv(rows, BLOCK_ROWS)
-    block_begin = program_id * num_row_blocks // num_programs
-    block_end = (program_id + 1) * num_row_blocks // num_programs
-    row_lanes = tl.arange(0, BLOCK_ROWS)
-    col_lanes = tl.arange(0, BLOCK_COLS)
-    gamma_first = tl.load(gamma_ptr + col_lanes)
-    gamma_second = tl.load(gamma_ptr + BLOCK_COLS + col_lanes)
-    output_dtype = out_ptr.dtype.element_ty
-    for block_id in tl.range(block_begin, block_end, num_stages=2):
-        row_ids = block_id * BLOCK_ROWS + row_lanes
-        row_mask = row_ids[:, None] < rows
-        first_offsets = row_ids[:, None] * cols + col_lanes[None, :]
-        second_offsets = first_offsets + BLOCK_COLS
-
-        first_hidden = tl.load(
-            hidden_states_ptr + first_offsets,
-            mask=row_mask,
-            other=0.0,
-        ).to(tl.float32)
-        if reisdual_ptr is not None:
-            first_residual = tl.load(
-                reisdual_ptr + first_offsets,
-                mask=row_mask,
-                other=0.0,
-            ).to(tl.float32)
-            first_hidden = first_hidden + first_residual
-        first_rounded = first_hidden.to(gamma_first.dtype)
-        first_fp32 = first_rounded.to(tl.float32)
-        first_sum = tl.sum(first_fp32 * first_fp32, axis=-1)
-
-        second_hidden = tl.load(
-            hidden_states_ptr + second_offsets,
-            mask=row_mask,
-            other=0.0,
-        ).to(tl.float32)
-        if reisdual_ptr is not None:
-            second_residual = tl.load(
-                reisdual_ptr + second_offsets,
-                mask=row_mask,
-                other=0.0,
-            ).to(tl.float32)
-            second_hidden = second_hidden + second_residual
-        second_rounded = second_hidden.to(gamma_second.dtype)
-        second_fp32 = second_rounded.to(tl.float32)
-        second_sum = tl.sum(second_fp32 * second_fp32, axis=-1)
-
-        inv_rms = tl.math.rsqrt((first_sum + second_sum) / cols + eps)
-        first_out = (
-            first_fp32 * inv_rms[:, None] * gamma_first[None, :]
-        )
-        second_out = (
-            second_fp32 * inv_rms[:, None] * gamma_second[None, :]
-        )
-        tl.store(out_copy_ptr + first_offsets, first_out, mask=row_mask)
-        tl.store(
-            out_ptr + first_offsets,
-            first_out.to(output_dtype),
-            mask=row_mask,
-        )
-        tl.store(out_copy_ptr + second_offsets, second_out, mask=row_mask)
-        tl.store(
-            out_ptr + second_offsets,
-            second_out.to(output_dtype),
-            mask=row_mask,
-        )
-
-
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_rms_norm_kernel,
@@ -487,27 +404,11 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = None
-            if use_prefill_2d:
-                kernel = _candidate_splitcol_prefill_rms_norm_kernel
-            elif use_decode_2d:
+            if use_multirow:
                 kernel = _candidate_multirow_rms_norm_kernel
 
             def launch() -> object:
                 if use_multirow:
-                    if use_prefill_2d:
-                        return kernel[(num_programs,)](
-                            hidden_states,
-                            residual,
-                            self.weight,
-                            output,
-                            fp32_out,
-                            rows,
-                            HIDDEN_DIM,
-                            EPS,
-                            block_rows,
-                            PREFILL_BLOCK_COLS,
-                            multibuffer=False,
-                        )
                     return kernel[(num_programs,)](
                         hidden_states,
                         residual,
@@ -582,10 +483,9 @@ def logical_bytes_for(case: Case, provider: str) -> int:
 
 
 def kernel_name_for(case: Case, provider: str) -> str:
-    if provider == "candidate" and case.rows >= PREFILL_2D_MIN_ROWS:
-        return "_candidate_splitcol_prefill_rms_norm_kernel"
     if provider == "candidate" and (
-        DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
+        case.rows >= PREFILL_2D_MIN_ROWS
+        or DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
     ):
         return "_candidate_multirow_rms_norm_kernel"
     return f"_{provider}_rms_norm_kernel"
