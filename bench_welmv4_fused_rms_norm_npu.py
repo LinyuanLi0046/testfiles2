@@ -45,7 +45,7 @@ import triton.language as tl
 
 HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
-PREFILL_BLOCK_ROWS = 8
+PREFILL_BLOCK_ROWS = 4
 PREFILL_2D_MIN_ROWS = 4096
 DECODE_BLOCK_ROWS = 2
 DECODE_2D_MIN_ROWS = 40
@@ -421,7 +421,7 @@ class Harness:
                             EPS,
                             BLOCK_SIZE,
                             block_rows,
-                            multibuffer=False,
+                            hfusion_enable_multiple_consumer_fusion=True,
                         )
                     return kernel[(num_programs,)](
                         hidden_states,

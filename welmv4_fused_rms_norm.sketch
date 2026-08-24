@@ -687,7 +687,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 18/30 (pipeline depth for UB-safe larger tiling)`
 - `ir_has_more_suggestions: true (use the NPU multibuffer compile option)`
 
-### R16 — explicitly disable multibuffer for eight-row Prefill (pending)
+### R16 — explicitly disable multibuffer for eight-row Prefill (`1afd907`, rejected)
 
 - Unique effective optimization point from R14: launch only the eight-row
   Prefill variant with the NPU compile option `multibuffer=False`. Decode
@@ -698,5 +698,28 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Runtime M stays in `do_not_specialize`; `multibuffer=False` belongs to one
   stable named Prefill strategy and does not vary with request shape.
 - Arithmetic, masks, grid, row mapping, and output contract are unchanged.
+- A5 correctness passes all 36 records and UB compilation succeeds, proving
+  the launch option controls the pass. However Prefill speedups fall to
+  1.2172x/1.3272x/1.3264x/1.2993x/1.2935x, below retained R12/R10.
+- At M16384 the candidate uses only about 219--225 MTE2 and 73--75 MTE3
+  instructions per AIV, but without multibuffer MTE2 and MTE3 each occupy
+  roughly half the AIV timeline. The lost overlap outweighs larger DMA tiles.
+- Decision: reject; restore four rows and the default A5 multibuffer path.
 - `hit_optimization_point: 18/30 (UB-safe large tile via compile option)`
+- `ir_has_more_suggestions: true (dual-output multiple-consumer fusion)`
+
+### R17 — fuse the FP32 output's two consumers (pending)
+
+- Unique effective optimization point from retained R12: enable
+  `hfusion_enable_multiple_consumer_fusion=True` only for the four-row Prefill
+  variant. BLOCK_ROWS returns to 4 and automatic multibuffer remains enabled.
+- The normalized FP32 tile has two consumers: direct FP32 store and BF16 cast
+  followed by BF16 store. R14/R16 final IR materializes a full FP32 output UB
+  buffer before these branches; the HFusion option is specifically intended
+  to fuse multiple-consumer graphs and defaults to false.
+- Goal: reduce intermediate UB traffic/lifetime and synchronization while
+  preserving the four-row load/compute/store overlap.
+- The option is one stable Prefill compile strategy. Runtime M remains in
+  `do_not_specialize`; no request-derived constexpr or dispatch is added.
+- `hit_optimization_point: 30 (IR-guided multiple-consumer fusion)`
 - `ir_has_more_suggestions: pending compile, IR, and msprof op`
