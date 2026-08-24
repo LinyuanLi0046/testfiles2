@@ -350,7 +350,7 @@ class Harness:
                     HIDDEN_DIM,
                     EPS,
                     BLOCK_SIZE,
-                    multibuffer=True,
+                    enable_flatten=True,
                 )
 
         else:

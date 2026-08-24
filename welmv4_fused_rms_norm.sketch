@@ -492,7 +492,7 @@ revisit point 18 if the multi-case performance threshold requires it.
   atomic scatter, default-output fill, interpolation, pooling, matmul, or CV
   pipeline in this pure Vector RMSNorm.
 
-### R8 — optimization point 30: explicit A5 multibuffer (pending remote result)
+### R8 — optimization point 30: explicit A5 multibuffer (`bc21966`, rejected)
 
 - Latest R6 IR is analyzed at TTIR, TTAdapter, and final BishengIR. It contains
   the expected three loads/two stores and a single row pipeline. TTAdapter has
@@ -509,5 +509,32 @@ revisit point 18 if the multi-case performance threshold requires it.
 - This compiler option is shape-independent. All M values remain runtime
   values in `do_not_specialize`; the new decode M12/24/40/48/56 cases expand
   validation coverage without creating shape-derived constexpr parameters.
+- A5 correctness: all 36 records PASS, including added M12/24/40/48/56.
+- Fresh final BishengIR SHA256 is exactly identical to R6
+  (`1cabcc08...10b2`), proving that this compile path discards or fully
+  canonicalizes the option. TTIR/TTAdapter metadata hashes change, but final
+  device code does not expose a multibuffer transformation.
+- Direct candidate p50 versus the preceding unchanged-path run is M4096
+  67.861 -> 70.042 us, M8192 154.673 -> 155.762 us, M9616 183.398 ->
+  184.440 us, M16361 341.370 -> 343.899 us, and M16384 349.286 ->
+  348.508 us. There is no material improvement; M4096 regresses 3.2%.
+- Decision: rejected. Remove `multibuffer=True` and keep the retained R6
+  kernel plus the expanded decode coverage.
 - `hit_optimization_point: 30 (IR-guided revisit of multibuffer)`
+- `ir_has_more_suggestions: true (pure-Vector flatten option remains untested)`
+
+### R9 — optimization point 30: explicit pure-Vector flatten (pending remote result)
+
+- A5 compiler guidance recommends `enable_flatten=True` for pure Vector
+  kernels. The candidate is a row loop containing only GM loads, Vector
+  arithmetic/reduction, and GM stores; it has no Cube or CV synchronization.
+- Unique optimization point: replace the rejected compile option with only
+  `enable_flatten=True` on the candidate launch. No multibuffer option remains.
+- All R6 JIT source, runtime `rows`, grid, arithmetic, and output stores stay
+  unchanged. The option is constant across all shapes and cannot create an
+  M-derived JIT key.
+- Expected IR effect: flatten/canonicalize the per-program row loop so the
+  backend may simplify scheduling and reduce loop-control overhead while
+  preserving one independent RMS reduction per row.
+- `hit_optimization_point: 30 (IR-guided pure-Vector flatten)`
 - `ir_has_more_suggestions: pending fresh remote IR`
