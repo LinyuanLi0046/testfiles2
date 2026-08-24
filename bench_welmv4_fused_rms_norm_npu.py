@@ -366,12 +366,7 @@ class Harness:
             and DECODE_2D_MIN_ROWS <= rows <= DECODE_2D_MAX_ROWS
         )
         use_multirow = use_prefill_2d or use_decode_2d
-        use_fourrow_decode = use_decode_2d and rows == DECODE_2D_MAX_ROWS
-        block_rows = (
-            PREFILL_BLOCK_ROWS
-            if use_prefill_2d or use_fourrow_decode
-            else DECODE_BLOCK_ROWS
-        )
+        block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
         if use_multirow:
             num_programs = min(
                 triton.cdiv(rows, block_rows), self.num_vector_cores

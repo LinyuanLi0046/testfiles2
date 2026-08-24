@@ -852,7 +852,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Decision: reject. Remove the named full-block kernel and restore the masked
   R12 two-row implementation before the next Decode-only experiment.
 
-### R23 — balanced four-row Decode tile for M128 (pending)
+### R23 — balanced four-row Decode tile for M128 (`a3ebb37`, rejected)
 
 - Prefill remains byte-for-byte identical to frozen R12. Decode M1--64 also
   returns to the retained R12 paths.
@@ -869,4 +869,24 @@ revisit point 18 if the multi-case performance threshold requires it.
   the launch grid changes. No arithmetic, reduction order within a row, dtype,
   mask contract, or output changes.
 - `hit_optimization_point: 30 (Decode four-row tiling and balanced grid)`
+
+- A5 correctness passes all 36 checks. Frozen Prefill controls remain in their
+  retained range, including M16384 at 281.866 us.
+- M128 regresses from the verified R12 absolute candidate time 4.454 us to
+  5.335 us (about 19.8% slower), and is also slower than its same-run baseline
+  at 0.9301x. Combining two double-row iterations into one four-row tile does
+  not compensate for halving the active program count from 56 to 32.
+- Decision: reject. Restore R12 exactly. Do not test the still smaller M64 or
+  M48/M56 with four-row tiling: they would expose only 16/12/14 programs and
+  have an even weaker parallelism/aggregation tradeoff.
+
+### Final freeze after Decode recheck
+
+- Prefill: retain R12 `BLOCK_ROWS=4` for M>=4096.
+- Decode: retain R12 one-row path for M1--32 and `BLOCK_ROWS=2` for M40--128.
+- R22 proves boundary-mask removal has no repeatable absolute-time benefit;
+  R23 proves four-row Decode aggregation loses too much parallelism. Remaining
+  small-M task time is dominated by the roughly 3 us launch/task envelope, not
+  removable tensor traffic, so no remaining skill point has a justified >=3%
+  expectation without changing the operator boundary or using graph fusion.
 - `ir_has_more_suggestions: pending accuracy and msprof op`
