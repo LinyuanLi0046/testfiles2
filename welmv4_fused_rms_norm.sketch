@@ -729,7 +729,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (IR-guided multiple-consumer fusion)`
 - `ir_has_more_suggestions: true (AutoVectorizeV2 on the 2D apply chain)`
 
-### R18 — AutoVectorizeV2 for four-row Prefill (pending)
+### R18 — AutoVectorizeV2 for four-row Prefill (`083e081`, rejected)
 
 - Unique optimization point from retained R12: enable only
   `enable_auto_vectorize_v2=True` for the fixed four-row Prefill variant.
@@ -740,5 +740,28 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Runtime M, masks, four-row tiling, multibuffer, arithmetic order, and output
   dtypes are unchanged. The option is not request-derived and cannot create
   per-M compiled variants.
+- A5 correctness passes, but all three IR hashes are again exactly identical
+  to R12/R17. Only M4096 happens to measure 1.548x in this run; the other four
+  remain 1.456x/1.424x/1.333x/1.333x, demonstrating measurement variation
+  rather than a transformed pipeline.
+- Decision: reject; stop testing adjacent no-op compiler toggles.
 - `hit_optimization_point: 30 (IR-guided vector pipeline optimization)`
-- `ir_has_more_suggestions: pending compile, IR, and msprof op`
+- `ir_has_more_suggestions: true (selective manual prefetch for eight rows)`
+
+### R19 — eight rows with selective BF16-hidden prefetch (pending)
+
+- Unique optimization point from R16's working eight-row single-buffer path:
+  manually preload only the next tile's BF16 hidden tensor. The current and
+  next hidden tiles consume 32 KiB each; residual, FP32 norm input/output, and
+  BF16 output remain single-buffered under `multibuffer=False`.
+- The loop has a prologue, an unconditional next-tile load for every non-final
+  iteration, and one final epilogue. It does not issue a duplicate last-tile
+  prefetch and contains no data-dependent prefetch branch.
+- Goal: preserve R16's roughly 219--225 MTE2 and 73--75 MTE3 instructions at
+  M16384 while overlapping part of next MTE2 with current reduction/stores.
+- `PREFETCH_HIDDEN=True/False` is a fixed algorithm strategy (Prefill/Decode),
+  not a request value. Runtime M remains in `do_not_specialize`, and all masks
+  and loop bounds remain dynamic. Decode retains its R12 two-row path.
+- Per-row arithmetic and both output dtypes are unchanged.
+- `hit_optimization_point: 18/30 (manual selective double buffering)`
+- `ir_has_more_suggestions: pending compile, UB, precision, and msprof op`

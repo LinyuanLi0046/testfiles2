@@ -45,7 +45,7 @@ import triton.language as tl
 
 HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
-PREFILL_BLOCK_ROWS = 4
+PREFILL_BLOCK_ROWS = 8
 PREFILL_2D_MIN_ROWS = 4096
 DECODE_BLOCK_ROWS = 2
 DECODE_2D_MIN_ROWS = 40
@@ -245,6 +245,7 @@ def _candidate_multirow_rms_norm_kernel(
     eps: float,
     BLOCK_SIZE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    PREFETCH_HIDDEN: tl.constexpr,
 ):
     program_id = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -255,22 +256,78 @@ def _candidate_multirow_rms_norm_kernel(
     cols_off = tl.arange(0, BLOCK_SIZE)
     gamma_shm = tl.load(gamma_ptr + cols_off)
     output_dtype = out_ptr.dtype.element_ty
-    for block_id in tl.range(block_begin, block_end, num_stages=2):
-        row_ids = block_id * BLOCK_ROWS + row_lanes
-        offsets = row_ids[:, None] * cols + cols_off[None, :]
-        mask = row_ids[:, None] < rows
-        hidden = tl.load(
-            hidden_states_ptr + offsets, mask=mask, other=0.0
-        ).to(tl.float32)
+    if PREFETCH_HIDDEN:
+        cur_row_ids = block_begin * BLOCK_ROWS + row_lanes
+        cur_offsets = cur_row_ids[:, None] * cols + cols_off[None, :]
+        cur_mask = cur_row_ids[:, None] < rows
+        cur_hidden = tl.load(
+            hidden_states_ptr + cur_offsets, mask=cur_mask, other=0.0
+        )
+        for block_id in tl.range(
+            block_begin, block_end - 1, num_stages=2
+        ):
+            next_row_ids = (block_id + 1) * BLOCK_ROWS + row_lanes
+            next_offsets = (
+                next_row_ids[:, None] * cols + cols_off[None, :]
+            )
+            next_mask = next_row_ids[:, None] < rows
+            next_hidden = tl.load(
+                hidden_states_ptr + next_offsets,
+                mask=next_mask,
+                other=0.0,
+            )
+
+            hidden = cur_hidden.to(tl.float32)
+            if reisdual_ptr is not None:
+                residual = tl.load(
+                    reisdual_ptr + cur_offsets, mask=cur_mask, other=0.0
+                ).to(tl.float32)
+                hidden = hidden + residual
+            out = _candidate_do_rms_norm_2d(
+                hidden, gamma_shm, cols, eps
+            )
+            tl.store(out_copy_ptr + cur_offsets, out, mask=cur_mask)
+            tl.store(
+                out_ptr + cur_offsets,
+                out.to(output_dtype),
+                mask=cur_mask,
+            )
+
+            cur_row_ids = next_row_ids
+            cur_offsets = next_offsets
+            cur_mask = next_mask
+            cur_hidden = next_hidden
+
+        hidden = cur_hidden.to(tl.float32)
         if reisdual_ptr is not None:
             residual = tl.load(
-                reisdual_ptr + offsets, mask=mask, other=0.0
+                reisdual_ptr + cur_offsets, mask=cur_mask, other=0.0
             ).to(tl.float32)
             hidden = hidden + residual
-
         out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
-        tl.store(out_copy_ptr + offsets, out, mask=mask)
-        tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
+        tl.store(out_copy_ptr + cur_offsets, out, mask=cur_mask)
+        tl.store(
+            out_ptr + cur_offsets,
+            out.to(output_dtype),
+            mask=cur_mask,
+        )
+    else:
+        for block_id in tl.range(block_begin, block_end, num_stages=2):
+            row_ids = block_id * BLOCK_ROWS + row_lanes
+            offsets = row_ids[:, None] * cols + cols_off[None, :]
+            mask = row_ids[:, None] < rows
+            hidden = tl.load(
+                hidden_states_ptr + offsets, mask=mask, other=0.0
+            ).to(tl.float32)
+            if reisdual_ptr is not None:
+                residual = tl.load(
+                    reisdual_ptr + offsets, mask=mask, other=0.0
+                ).to(tl.float32)
+                hidden = hidden + residual
+
+            out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
+            tl.store(out_copy_ptr + offsets, out, mask=mask)
+            tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
 
 PROVIDERS = {
@@ -421,7 +478,8 @@ class Harness:
                             EPS,
                             BLOCK_SIZE,
                             block_rows,
-                            enable_auto_vectorize_v2=True,
+                            True,
+                            multibuffer=False,
                         )
                     return kernel[(num_programs,)](
                         hidden_states,
@@ -434,6 +492,7 @@ class Harness:
                         EPS,
                         BLOCK_SIZE,
                         block_rows,
+                        False,
                     )
                 return kernel[(num_programs,)](
                     hidden_states,
