@@ -615,7 +615,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (A5 Decode SIMT specialization)`
 - `ir_has_more_suggestions: true (multi-row Decode group remains)`
 
-### R12 — two-row Decode tile for M40-128 (pending remote result)
+### R12 — two-row Decode tile for M40-128 (`3b55ecf`, retained)
 
 - Unique optimization point: M40/48/56/64/128 use the retained multi-row
   kernel with `BLOCK_ROWS=2`; M1-32 return to the R6 one-row SIMD kernel.
@@ -624,5 +624,25 @@ revisit point 18 if the multi-case performance threshold requires it.
 - Prefill continues to use the same multi-row source with BLOCK_ROWS=4 and is
   otherwise unchanged. Runtime M stays in `do_not_specialize`; BLOCK_ROWS is a
   fixed tiling choice with only two stable compiled variants.
+- A5 correctness passes. Decode speedups are M40 1.0847x, M48 1.1424x,
+  M56 1.1203x, M64 1.1932x, and M128 1.1582x. Every targeted case clears
+  the 3% retention threshold, though none yet reaches 1.30x.
+- Prefill controls remain 1.3287x to 1.4622x.
+- Decision: retain two-row tiling for M40-128.
 - `hit_optimization_point: 30 (Decode multi-row tiling)`
-- `ir_has_more_suggestions: pending all-decode msprof op`
+- `ir_has_more_suggestions: true (per-tile boundary mask remains)`
+
+### R13 — no-mask full multi-row blocks plus one runtime tail (pending result)
+
+- Unique optimization point: all complete BLOCK_ROWS tiles use unmasked 2D
+  loads/stores. Only the final incomplete tile, when runtime `tail_start < M`,
+  executes one masked path on the last program.
+- M4096/8192/9616/16384 and all two-row Decode cases are exactly divisible,
+  so their hot loops contain no boundary mask. M16361 executes 4090 full
+  four-row blocks plus one masked one-row tail.
+- Runtime M and tail existence are ordinary scalar values, not constexpr or
+  JIT keys. There is one fixed multi-row kernel per BLOCK_ROWS tiling variant;
+  no per-shape compilation is introduced.
+- Arithmetic order and output dtypes are unchanged.
+- `hit_optimization_point: 30 (IR-guided redundant boundary removal)`
+- `ir_has_more_suggestions: pending fresh IR and msprof op`

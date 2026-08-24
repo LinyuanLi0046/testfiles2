@@ -248,9 +248,9 @@ def _candidate_multirow_rms_norm_kernel(
 ):
     program_id = tl.program_id(0)
     num_programs = tl.num_programs(0)
-    num_row_blocks = tl.cdiv(rows, BLOCK_ROWS)
-    block_begin = program_id * num_row_blocks // num_programs
-    block_end = (program_id + 1) * num_row_blocks // num_programs
+    num_full_blocks = rows // BLOCK_ROWS
+    block_begin = program_id * num_full_blocks // num_programs
+    block_end = (program_id + 1) * num_full_blocks // num_programs
     row_lanes = tl.arange(0, BLOCK_ROWS)
     cols_off = tl.arange(0, BLOCK_SIZE)
     gamma_shm = tl.load(gamma_ptr + cols_off)
@@ -258,19 +258,33 @@ def _candidate_multirow_rms_norm_kernel(
     for block_id in tl.range(block_begin, block_end, num_stages=2):
         row_ids = block_id * BLOCK_ROWS + row_lanes
         offsets = row_ids[:, None] * cols + cols_off[None, :]
-        mask = row_ids[:, None] < rows
-        hidden = tl.load(
-            hidden_states_ptr + offsets, mask=mask, other=0.0
-        ).to(tl.float32)
+        hidden = tl.load(hidden_states_ptr + offsets).to(tl.float32)
         if reisdual_ptr is not None:
-            residual = tl.load(
-                reisdual_ptr + offsets, mask=mask, other=0.0
-            ).to(tl.float32)
+            residual = tl.load(reisdual_ptr + offsets).to(tl.float32)
             hidden = hidden + residual
 
         out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
-        tl.store(out_copy_ptr + offsets, out, mask=mask)
-        tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
+        tl.store(out_copy_ptr + offsets, out)
+        tl.store(out_ptr + offsets, out.to(output_dtype))
+
+    tail_start = num_full_blocks * BLOCK_ROWS
+    if program_id == num_programs - 1:
+        if tail_start < rows:
+            row_ids = tail_start + row_lanes
+            offsets = row_ids[:, None] * cols + cols_off[None, :]
+            mask = row_ids[:, None] < rows
+            hidden = tl.load(
+                hidden_states_ptr + offsets, mask=mask, other=0.0
+            ).to(tl.float32)
+            if reisdual_ptr is not None:
+                residual = tl.load(
+                    reisdual_ptr + offsets, mask=mask, other=0.0
+                ).to(tl.float32)
+                hidden = hidden + residual
+
+            out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
+            tl.store(out_copy_ptr + offsets, out, mask=mask)
+            tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
 
 PROVIDERS = {
