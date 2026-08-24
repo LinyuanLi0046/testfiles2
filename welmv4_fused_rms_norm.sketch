@@ -748,7 +748,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (IR-guided vector pipeline optimization)`
 - `ir_has_more_suggestions: true (selective manual prefetch for eight rows)`
 
-### R19 — eight rows with selective BF16-hidden prefetch (pending)
+### R19 — loop-carried BF16-hidden prefetch (`30c0780`, rejected implementation)
 
 - Unique optimization point from R16's working eight-row single-buffer path:
   manually preload only the next tile's BF16 hidden tensor. The current and
@@ -763,5 +763,25 @@ revisit point 18 if the multi-case performance threshold requires it.
   not a request value. Runtime M remains in `do_not_specialize`, and all masks
   and loop bounds remain dynamic. Decode retains its R12 two-row path.
 - Per-row arithmetic and both output dtypes are unchanged.
+- Remote compilation aborts in TritonToLinalg BlockPtrAnalysis while rewriting
+  the `scf.yield` for the loop-carried 2D tensor: `attribute strides should be
+  ones`. This is a frontend limitation, not UB or a numeric failure.
+- Decision: reject this implementation; retain the selective-prefetch idea
+  without carrying tensors across loop iterations.
 - `hit_optimization_point: 18/30 (manual selective double buffering)`
+- `ir_has_more_suggestions: true (pair two tiles inside each iteration)`
+
+### R20 — paired eight-row blocks with selective hidden overlap (pending)
+
+- Unique implementation correction from R19: partition global row blocks into
+  runtime pairs. Each loop iteration loads both `[8,2048]` BF16 hidden tiles,
+  then computes/stores the first and second tile sequentially.
+- No tensor is carried by `scf.yield`, so the failing BlockPtrAnalysis path is
+  removed. Only two BF16 hidden tiles coexist; residual and FP32 intermediates
+  are created sequentially for one eight-row tile at a time.
+- `num_block_pairs`, pair ranges, M, and both masks are runtime values. The
+  sole compile-time strategy constants remain fixed BLOCK_ROWS=8 and the
+  Prefill-only algorithm flag; no request shape enters the JIT key.
+- Arithmetic and output contracts remain identical. Decode is unchanged.
+- `hit_optimization_point: 18/30 (paired manual selective buffering)`
 - `ir_has_more_suggestions: pending compile, UB, precision, and msprof op`

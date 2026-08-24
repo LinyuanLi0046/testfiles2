@@ -257,60 +257,68 @@ def _candidate_multirow_rms_norm_kernel(
     gamma_shm = tl.load(gamma_ptr + cols_off)
     output_dtype = out_ptr.dtype.element_ty
     if PREFETCH_HIDDEN:
-        cur_row_ids = block_begin * BLOCK_ROWS + row_lanes
-        cur_offsets = cur_row_ids[:, None] * cols + cols_off[None, :]
-        cur_mask = cur_row_ids[:, None] < rows
-        cur_hidden = tl.load(
-            hidden_states_ptr + cur_offsets, mask=cur_mask, other=0.0
-        )
-        for block_id in tl.range(
-            block_begin, block_end - 1, num_stages=2
-        ):
-            next_row_ids = (block_id + 1) * BLOCK_ROWS + row_lanes
-            next_offsets = (
-                next_row_ids[:, None] * cols + cols_off[None, :]
+        num_block_pairs = tl.cdiv(num_row_blocks, 2)
+        pair_begin = program_id * num_block_pairs // num_programs
+        pair_end = (program_id + 1) * num_block_pairs // num_programs
+        for pair_id in tl.range(pair_begin, pair_end, num_stages=2):
+            first_block_id = pair_id * 2
+            second_block_id = first_block_id + 1
+            first_row_ids = first_block_id * BLOCK_ROWS + row_lanes
+            second_row_ids = second_block_id * BLOCK_ROWS + row_lanes
+            first_offsets = (
+                first_row_ids[:, None] * cols + cols_off[None, :]
             )
-            next_mask = next_row_ids[:, None] < rows
-            next_hidden = tl.load(
-                hidden_states_ptr + next_offsets,
-                mask=next_mask,
+            second_offsets = (
+                second_row_ids[:, None] * cols + cols_off[None, :]
+            )
+            first_mask = first_row_ids[:, None] < rows
+            second_mask = second_row_ids[:, None] < rows
+            first_hidden = tl.load(
+                hidden_states_ptr + first_offsets,
+                mask=first_mask,
+                other=0.0,
+            )
+            second_hidden = tl.load(
+                hidden_states_ptr + second_offsets,
+                mask=second_mask,
                 other=0.0,
             )
 
-            hidden = cur_hidden.to(tl.float32)
+            hidden = first_hidden.to(tl.float32)
             if reisdual_ptr is not None:
                 residual = tl.load(
-                    reisdual_ptr + cur_offsets, mask=cur_mask, other=0.0
+                    reisdual_ptr + first_offsets,
+                    mask=first_mask,
+                    other=0.0,
                 ).to(tl.float32)
                 hidden = hidden + residual
             out = _candidate_do_rms_norm_2d(
                 hidden, gamma_shm, cols, eps
             )
-            tl.store(out_copy_ptr + cur_offsets, out, mask=cur_mask)
+            tl.store(out_copy_ptr + first_offsets, out, mask=first_mask)
             tl.store(
-                out_ptr + cur_offsets,
+                out_ptr + first_offsets,
                 out.to(output_dtype),
-                mask=cur_mask,
+                mask=first_mask,
             )
 
-            cur_row_ids = next_row_ids
-            cur_offsets = next_offsets
-            cur_mask = next_mask
-            cur_hidden = next_hidden
-
-        hidden = cur_hidden.to(tl.float32)
-        if reisdual_ptr is not None:
-            residual = tl.load(
-                reisdual_ptr + cur_offsets, mask=cur_mask, other=0.0
-            ).to(tl.float32)
-            hidden = hidden + residual
-        out = _candidate_do_rms_norm_2d(hidden, gamma_shm, cols, eps)
-        tl.store(out_copy_ptr + cur_offsets, out, mask=cur_mask)
-        tl.store(
-            out_ptr + cur_offsets,
-            out.to(output_dtype),
-            mask=cur_mask,
-        )
+            hidden = second_hidden.to(tl.float32)
+            if reisdual_ptr is not None:
+                residual = tl.load(
+                    reisdual_ptr + second_offsets,
+                    mask=second_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                hidden = hidden + residual
+            out = _candidate_do_rms_norm_2d(
+                hidden, gamma_shm, cols, eps
+            )
+            tl.store(out_copy_ptr + second_offsets, out, mask=second_mask)
+            tl.store(
+                out_ptr + second_offsets,
+                out.to(output_dtype),
+                mask=second_mask,
+            )
     else:
         for block_id in tl.range(block_begin, block_end, num_stages=2):
             row_ids = block_id * BLOCK_ROWS + row_lanes
