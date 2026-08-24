@@ -653,7 +653,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (IR-guided redundant boundary removal)`
 - `ir_has_more_suggestions: true (larger Prefill tile remains)`
 
-### R14 — eight-row Prefill tile (pending remote result)
+### R14 — eight-row Prefill tile (`642c3dd`, rejected)
 
 - Unique optimization point from retained R12: Prefill BLOCK_ROWS changes
   from 4 to 8. Decode remains BLOCK_ROWS=2 with the retained masked loop.
@@ -662,5 +662,23 @@ revisit point 18 if the multi-case performance threshold requires it.
   unchanged.
 - A5 UB risk is explicitly tested. If the compiler reports overflow or any
   precision failure, the tiling is rejected without relaxing the contract.
+- A5 compilation fails in PlanMemory: the kernel requires 3,211,520 bits of
+  UB while Ascend950PR_957b exposes 2,031,616 bits. The failed final IR marks
+  the large hidden/residual/output buffers with `hivm.multi_buffer = 2`.
+- Decision: eight rows cannot be retained with the two-stage row loop.
 - `hit_optimization_point: 30 (IR-guided larger multi-row tile)`
+- `ir_has_more_suggestions: true (remove Prefill-only double buffering)`
+
+### R15 — eight-row Prefill tile with a single pipeline stage (pending)
+
+- Unique optimization point from failed R14: only the Prefill multi-row loop
+  changes from `num_stages=2` to `num_stages=1`. The eight-row DMA tile stays
+  fixed; Decode keeps BLOCK_ROWS=2 and `num_stages=2`.
+- Goal: remove the IR-observed double UB buffers so the eight-row tile fits in
+  2,031,616 bits. This may reduce load/compute/store overlap, but retains the
+  halved DMA/loop issue count relative to four-row R12.
+- `NUM_STAGES` is a stable kernel-strategy constexpr, not a request-derived
+  value. Runtime M remains in `do_not_specialize`; arithmetic, masks, grid,
+  output dtypes, and all shape behavior are unchanged.
+- `hit_optimization_point: 18/30 (pipeline depth for UB-safe larger tiling)`
 - `ir_has_more_suggestions: pending compile, IR, and msprof op`
