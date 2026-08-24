@@ -771,7 +771,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 18/30 (manual selective double buffering)`
 - `ir_has_more_suggestions: true (pair two tiles inside each iteration)`
 
-### R20 — paired eight-row blocks with selective hidden overlap (pending)
+### R20 — paired eight-row blocks with selective hidden overlap (`8650f6a`, rejected)
 
 - Unique implementation correction from R19: partition global row blocks into
   runtime pairs. Each loop iteration loads both `[8,2048]` BF16 hidden tiles,
@@ -783,5 +783,31 @@ revisit point 18 if the multi-case performance threshold requires it.
   sole compile-time strategy constants remain fixed BLOCK_ROWS=8 and the
   Prefill-only algorithm flag; no request shape enters the JIT key.
 - Arithmetic and output contracts remain identical. Decode is unchanged.
+- A5 reaches PlanMemory but requires 2,621,696 bits (about 320 KiB) versus
+  2,031,616 bits available. Final IR allocates distinct FP32/BF16 compute and
+  output buffers for both sequential tiles instead of reusing the first set.
+- Decision: reject; an extra 8-row BF16 tile cannot coexist with the compiler's
+  generated temporaries under the exact dual-output contract.
 - `hit_optimization_point: 18/30 (paired manual selective buffering)`
+- `ir_has_more_suggestions: true (split the reduction's column axis)`
+
+### R21 — eight rows with two fixed 1024-column reduction halves (pending)
+
+- Unique algorithmic point: a dedicated Prefill kernel keeps BLOCK_ROWS=8 but
+  splits fixed N=2048 into two 1024-column halves. Each half performs the same
+  FP32 residual add followed by BF16 rounding and a FP32 partial square sum;
+  the two partial sums are added before rsqrt.
+- The apply phase reuses each half's rounded FP32 values and writes the exact
+  FP32/BF16 dual outputs. The binary reduction tree is expressed as two 1024
+  reductions plus one add, matching the natural top level of a 2048 reduction;
+  full reference accuracy remains mandatory.
+- Goal: retain eight-row DMA while reducing the live width of FP32 elementwise
+  temporaries from 2048 to 1024. Automatic multibuffer stays disabled for this
+  large-tile kernel; explicit half ordering may expose intra-tile MTE/Vector
+  overlap without duplicating a complete tile.
+- Runtime rows, row-block ranges, and masks remain dynamic and rows stays in
+  `do_not_specialize`. BLOCK_ROWS=8, BLOCK_COLS=1024, and N=2048 are fixed
+  model/tiling constants, never request-derived values.
+- Decode returns byte-for-byte to the retained R12 two-row generic kernel.
+- `hit_optimization_point: 18/30 (column tiling and partial reduction)`
 - `ir_has_more_suggestions: pending compile, UB, precision, and msprof op`
