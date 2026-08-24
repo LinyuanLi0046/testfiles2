@@ -558,3 +558,21 @@ revisit point 18 if the multi-case performance threshold requires it.
   `do_not_specialize`; N=2048 and BLOCK=2048 are fixed model-contract values.
 - All ordered latency-skill points and the IR-guided follow-up suggestions have
   been checked. Rejected branches are removed from executable source.
+
+### R10 — IR-guided 4-row Prefill tile (pending remote result)
+
+- The 30% target reopens IR iteration. R6 executes about 293 row-loop
+  iterations per AIV at M16384, issuing separate hidden/residual loads and
+  FP32/BF16 stores for every row. MTE2 remains the dominant pipeline.
+- Unique optimization point: for Prefill M>=4096, group four independent rows
+  into one regular `[4,2048]` tile. This cuts row-loop and DMA issue count to
+  one quarter and matches the A5 multi-row tiling guidance.
+- Decode keeps the retained R6 kernel byte-for-byte. The Prefill grid is
+  `min(ceil(M/4), physical_AIV)` and each AIV receives contiguous row blocks.
+- M remains a runtime value in `do_not_specialize`; `BLOCK_ROWS=4` and N=2048
+  are fixed tiling/model constants. The sole row mask protects the final tile.
+- Conservative UB estimate is below the A5 248 KiB budget with multibuffer
+  disabled. No arithmetic order changes within a row: FP32 residual add, BF16
+  rounding, FP32 reduction/rsqrt/gamma, and both output dtypes are preserved.
+- `hit_optimization_point: 30 (IR-guided multi-row tiling)`
+- `ir_has_more_suggestions: pending fresh remote IR`

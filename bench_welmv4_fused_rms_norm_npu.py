@@ -45,6 +45,8 @@ import triton.language as tl
 
 HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
+PREFILL_BLOCK_ROWS = 4
+PREFILL_2D_MIN_ROWS = 4096
 EPS = 1.0e-5
 MODEL_DTYPE = torch.bfloat16
 RESIDUAL_DTYPE = torch.float32
@@ -219,6 +221,46 @@ def _candidate_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype))
 
 
+@triton.jit(do_not_specialize=["rows"])
+def _candidate_prefill_4row_rms_norm_kernel(
+    hidden_states_ptr: tl.tensor,
+    reisdual_ptr: tl.tensor,
+    gamma_ptr: tl.tensor,
+    out_ptr: tl.tensor,
+    out_copy_ptr: tl.tensor,
+    rows: int,
+    cols: tl.constexpr,
+    eps: float,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    program_id = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    num_row_blocks = tl.cdiv(rows, BLOCK_ROWS)
+    block_begin = program_id * num_row_blocks // num_programs
+    block_end = (program_id + 1) * num_row_blocks // num_programs
+    row_lanes = tl.arange(0, BLOCK_ROWS)
+    cols_off = tl.arange(0, BLOCK_SIZE)
+    gamma_shm = tl.load(gamma_ptr + cols_off)
+    output_dtype = out_ptr.dtype.element_ty
+    for block_id in tl.range(block_begin, block_end, num_stages=2):
+        row_ids = block_id * BLOCK_ROWS + row_lanes
+        offsets = row_ids[:, None] * cols + cols_off[None, :]
+        mask = row_ids[:, None] < rows
+        hidden = tl.load(
+            hidden_states_ptr + offsets, mask=mask, other=0.0
+        ).to(tl.float32)
+        if reisdual_ptr is not None:
+            residual = tl.load(
+                reisdual_ptr + offsets, mask=mask, other=0.0
+            ).to(tl.float32)
+            hidden = hidden + residual
+
+        out = _candidate_do_rms_norm(hidden, gamma_shm, cols, eps)
+        tl.store(out_copy_ptr + offsets, out, mask=mask)
+        tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
+
+
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_rms_norm_kernel,
@@ -306,12 +348,18 @@ class Harness:
             raise ValueError(f"expected hidden_dim={HIDDEN_DIM}, got {cols}")
         output = torch.empty_like(hidden_states)
         fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
-        num_programs = min(
-            rows,
-            self.num_vector_cores
-            if provider == "candidate"
-            else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
-        )
+        use_prefill_2d = provider == "candidate" and rows >= PREFILL_2D_MIN_ROWS
+        if use_prefill_2d:
+            num_programs = min(
+                triton.cdiv(rows, PREFILL_BLOCK_ROWS), self.num_vector_cores
+            )
+        else:
+            num_programs = min(
+                rows,
+                self.num_vector_cores
+                if provider == "candidate"
+                else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
+            )
         kernel = PROVIDERS[provider]
 
         if provider == "baseline":
@@ -338,8 +386,23 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = None
+            if use_prefill_2d:
+                kernel = _candidate_prefill_4row_rms_norm_kernel
 
             def launch() -> object:
+                if use_prefill_2d:
+                    return kernel[(num_programs,)](
+                        hidden_states,
+                        residual,
+                        self.weight,
+                        output,
+                        fp32_out,
+                        rows,
+                        HIDDEN_DIM,
+                        EPS,
+                        BLOCK_SIZE,
+                        PREFILL_BLOCK_ROWS,
+                    )
                 return kernel[(num_programs,)](
                     hidden_states,
                     residual,
@@ -399,6 +462,12 @@ def logical_bytes_for(case: Case, provider: str) -> int:
     # Main tensors only. Baseline writes two BF16 copies; candidate writes one.
     bytes_per_element = 14 if provider == "baseline" else 12
     return case.rows * HIDDEN_DIM * bytes_per_element
+
+
+def kernel_name_for(case: Case, provider: str) -> str:
+    if provider == "candidate" and case.rows >= PREFILL_2D_MIN_ROWS:
+        return "_candidate_prefill_4row_rms_norm_kernel"
+    return f"_{provider}_rms_norm_kernel"
 
 
 def case_fields(case: Case) -> dict[str, object]:
@@ -860,7 +929,7 @@ def capture_msprof_op_records(
     for case in cases:
         case_name = case.name
         for provider in PROVIDERS:
-            kernel_name = f"_{provider}_rms_norm_kernel"
+            kernel_name = kernel_name_for(case, provider)
             common = {
                 **harness.metadata(),
                 **case_fields(case),
