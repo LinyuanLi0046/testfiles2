@@ -669,7 +669,7 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `hit_optimization_point: 30 (IR-guided larger multi-row tile)`
 - `ir_has_more_suggestions: true (remove Prefill-only double buffering)`
 
-### R15 — eight-row Prefill tile with a single pipeline stage (pending)
+### R15 — eight-row Prefill tile with a single pipeline stage (`6e4d2b2`, rejected)
 
 - Unique optimization point from failed R14: only the Prefill multi-row loop
   changes from `num_stages=2` to `num_stages=1`. The eight-row DMA tile stays
@@ -680,5 +680,23 @@ revisit point 18 if the multi-case performance threshold requires it.
 - `NUM_STAGES` is a stable kernel-strategy constexpr, not a request-derived
   value. Runtime M remains in `do_not_specialize`; arithmetic, masks, grid,
   output dtypes, and all shape behavior are unchanged.
+- A5 fails with exactly the same 3,211,520-bit UB requirement. Final IR still
+  marks every large buffer `hivm.multi_buffer = 2`; on this NPU backend,
+  `tl.range(num_stages=1)` does not control the automatic multibuffer pass.
+- Decision: reject and remove the ineffective `NUM_STAGES` meta-parameter.
 - `hit_optimization_point: 18/30 (pipeline depth for UB-safe larger tiling)`
+- `ir_has_more_suggestions: true (use the NPU multibuffer compile option)`
+
+### R16 — explicitly disable multibuffer for eight-row Prefill (pending)
+
+- Unique effective optimization point from R14: launch only the eight-row
+  Prefill variant with the NPU compile option `multibuffer=False`. Decode
+  remains BLOCK_ROWS=2 with its existing/default multibuffer behavior.
+- This directly controls the A5 backend option that produced five observed
+  `hivm.multi_buffer = 2` buffers. Removing the ineffective R15 NUM_STAGES
+  parameter is behavior-neutral cleanup supported by its identical failed IR.
+- Runtime M stays in `do_not_specialize`; `multibuffer=False` belongs to one
+  stable named Prefill strategy and does not vary with request shape.
+- Arithmetic, masks, grid, row mapping, and output contract are unchanged.
+- `hit_optimization_point: 18/30 (UB-safe large tile via compile option)`
 - `ir_has_more_suggestions: pending compile, IR, and msprof op`

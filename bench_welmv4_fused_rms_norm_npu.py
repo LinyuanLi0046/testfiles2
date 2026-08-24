@@ -46,10 +46,8 @@ import triton.language as tl
 HIDDEN_DIM = 2048
 BLOCK_SIZE = 2048
 PREFILL_BLOCK_ROWS = 8
-PREFILL_NUM_STAGES = 1
 PREFILL_2D_MIN_ROWS = 4096
 DECODE_BLOCK_ROWS = 2
-DECODE_NUM_STAGES = 2
 DECODE_2D_MIN_ROWS = 40
 DECODE_2D_MAX_ROWS = 128
 EPS = 1.0e-5
@@ -247,7 +245,6 @@ def _candidate_multirow_rms_norm_kernel(
     eps: float,
     BLOCK_SIZE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
-    NUM_STAGES: tl.constexpr,
 ):
     program_id = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -258,9 +255,7 @@ def _candidate_multirow_rms_norm_kernel(
     cols_off = tl.arange(0, BLOCK_SIZE)
     gamma_shm = tl.load(gamma_ptr + cols_off)
     output_dtype = out_ptr.dtype.element_ty
-    for block_id in tl.range(
-        block_begin, block_end, num_stages=NUM_STAGES
-    ):
+    for block_id in tl.range(block_begin, block_end, num_stages=2):
         row_ids = block_id * BLOCK_ROWS + row_lanes
         offsets = row_ids[:, None] * cols + cols_off[None, :]
         mask = row_ids[:, None] < rows
@@ -372,9 +367,6 @@ class Harness:
         )
         use_multirow = use_prefill_2d or use_decode_2d
         block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
-        num_stages = (
-            PREFILL_NUM_STAGES if use_prefill_2d else DECODE_NUM_STAGES
-        )
         if use_multirow:
             num_programs = min(
                 triton.cdiv(rows, block_rows), self.num_vector_cores
@@ -417,6 +409,20 @@ class Harness:
 
             def launch() -> object:
                 if use_multirow:
+                    if use_prefill_2d:
+                        return kernel[(num_programs,)](
+                            hidden_states,
+                            residual,
+                            self.weight,
+                            output,
+                            fp32_out,
+                            rows,
+                            HIDDEN_DIM,
+                            EPS,
+                            BLOCK_SIZE,
+                            block_rows,
+                            multibuffer=False,
+                        )
                     return kernel[(num_programs,)](
                         hidden_states,
                         residual,
@@ -428,7 +434,6 @@ class Harness:
                         EPS,
                         BLOCK_SIZE,
                         block_rows,
-                        num_stages,
                     )
                 return kernel[(num_programs,)](
                     hidden_states,
