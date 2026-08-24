@@ -827,3 +827,19 @@ revisit point 18 if the multi-case performance threshold requires it.
 - The retained representative R12 task times are 48.678/118.133/146.135/
   282.868/283.262 us for M4096/8192/9616/16361/16384.
 - Further rounds target Decode only; Prefill is a protected control path.
+
+### R22 — Decode-only unmasked full two-row blocks (pending)
+
+- Prefill remains byte-for-byte identical to frozen R12.
+- Unique Decode optimization point: even runtime M>=48 uses a named full-block
+  kernel with BLOCK_ROWS=2 and no load/store boundary masks. M40, odd M, and
+  M1--32 retain the verified masked/one-row paths.
+- Historical R13 absolute candidate times improved over R12 by about 5% at
+  M48, 10% at M56, and 11% at M128. M40 improved only 1% and is deliberately
+  excluded. M64 is remeasured because its earlier 4% regression may be noise.
+- `rows` remains in `do_not_specialize` in both named kernels. The Python
+  parity/range dispatch selects one stable algorithm and never passes M as a
+  constexpr, so M48/56/64/128 share one compiled full-block variant.
+- Per-row arithmetic, grid, BF16 output, and FP32 output are unchanged.
+- `hit_optimization_point: 30 (Decode boundary-mask elimination)`
+- `ir_has_more_suggestions: pending accuracy and msprof op`
