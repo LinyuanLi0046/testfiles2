@@ -302,6 +302,45 @@ def _candidate_false_false_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype))
 
 
+@triton.jit(do_not_specialize=["rows"])
+def _candidate_false_false_multirow_rms_norm_kernel(
+    hidden_states_ptr: tl.tensor,
+    residual_ptr: tl.tensor,
+    gamma_ptr: tl.tensor,
+    out_ptr: tl.tensor,
+    out_residual_ptr: tl.tensor,
+    rows: int,
+    cols: tl.constexpr,
+    eps: float,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    program_id = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    num_row_blocks = tl.cdiv(rows, BLOCK_ROWS)
+    block_begin = program_id * num_row_blocks // num_programs
+    block_end = (program_id + 1) * num_row_blocks // num_programs
+    row_lanes = tl.arange(0, BLOCK_ROWS)
+    cols_off = tl.arange(0, BLOCK_SIZE)
+    gamma_shm = tl.load(gamma_ptr + cols_off)
+    output_dtype = out_ptr.dtype.element_ty
+    for block_id in tl.range(block_begin, block_end, num_stages=2):
+        row_ids = block_id * BLOCK_ROWS + row_lanes
+        offsets = row_ids[:, None] * cols + cols_off[None, :]
+        mask = row_ids[:, None] < rows
+        hidden = tl.load(
+            hidden_states_ptr + offsets, mask=mask, other=0.0
+        ).to(tl.float32)
+        residual = tl.load(
+            residual_ptr + offsets, mask=mask, other=0.0
+        ).to(tl.float32)
+        norm_input = hidden + residual
+        tl.store(out_residual_ptr + offsets, norm_input, mask=mask)
+
+        out = _candidate_do_rms_norm_2d(norm_input, gamma_shm, cols, eps)
+        tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
+
+
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
     "candidate": _candidate_false_false_rms_norm_kernel,
@@ -389,12 +428,24 @@ class Harness:
             raise ValueError(f"expected hidden_dim={HIDDEN_DIM}, got {cols}")
         output = torch.empty_like(hidden_states)
         fp32_out = None
-        num_programs = min(
-            rows,
-            self.num_vector_cores
-            if provider == "candidate"
-            else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
+        use_prefill_2d = provider == "candidate" and rows >= PREFILL_2D_MIN_ROWS
+        use_decode_2d = (
+            provider == "candidate"
+            and DECODE_2D_MIN_ROWS <= rows <= DECODE_2D_MAX_ROWS
         )
+        use_multirow = use_prefill_2d or use_decode_2d
+        block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
+        if use_multirow:
+            num_programs = min(
+                triton.cdiv(rows, block_rows), self.num_vector_cores
+            )
+        else:
+            num_programs = min(
+                rows,
+                self.num_vector_cores
+                if provider == "candidate"
+                else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
+            )
         kernel = PROVIDERS[provider]
 
         if provider == "baseline":
@@ -421,8 +472,23 @@ class Harness:
 
         elif provider == "candidate":
             residual_out = torch.empty_like(residual)
+            if use_multirow:
+                kernel = _candidate_false_false_multirow_rms_norm_kernel
 
             def launch() -> object:
+                if use_multirow:
+                    return kernel[(num_programs,)](
+                        hidden_states,
+                        residual,
+                        self.weight,
+                        output,
+                        residual_out,
+                        rows,
+                        HIDDEN_DIM,
+                        EPS,
+                        BLOCK_SIZE,
+                        block_rows,
+                    )
                 return kernel[(num_programs,)](
                     hidden_states,
                     residual,
@@ -485,6 +551,11 @@ def logical_bytes_for(case: Case, provider: str) -> int:
 
 
 def kernel_name_for(case: Case, provider: str) -> str:
+    if provider == "candidate" and (
+        case.rows >= PREFILL_2D_MIN_ROWS
+        or DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
+    ):
+        return "_candidate_false_false_multirow_rms_norm_kernel"
     if provider == "candidate":
         return "_candidate_false_false_rms_norm_kernel"
     return f"_{provider}_rms_norm_kernel"

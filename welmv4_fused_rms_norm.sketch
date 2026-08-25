@@ -938,7 +938,7 @@ sketch welmv4_false_false_fused_rms_norm {
       store(normalized -> output[row, 0:2048])
 }
 
-### F0 — False+False contract migration and physical-AIV partition (pending)
+### F0 — False+False contract migration and physical-AIV partition
 
 - Freeze the actual layer-1 contract with non-null FP32 residual:
   `out_residual = hidden.float() + residual.float()` is stored before the
@@ -955,4 +955,23 @@ sketch welmv4_false_false_fused_rms_norm {
 - Both providers move the same 12 main bytes/element, so any F0 gain measures
   scheduling/address simplification rather than output-traffic pruning.
 - `hit_optimization_point: 3`
+- A5 exact msprof-op correctness is 36/36. The single-row candidate changes
+  Prefill by only -1.43% to +0.16% and regresses Decode M64/M128 by 10.54% and
+  7.59%. Physical-AIV partition alone is therefore not retained as the final
+  schedule for those shapes.
+- `ir_has_more_suggestions: true (migrate the verified multi-row 2D schedule)`
+
+### F1 — False+False multi-row two-dimensional reduction (pending)
+
+- This round changes only row aggregation. Arithmetic, tensor traffic, output
+  order, masks, and the physical-AIV upper bound remain unchanged.
+- Prefill M>=4096 uses `BLOCK_ROWS=4`; Decode M40--128 uses `BLOCK_ROWS=2`;
+  Decode M1--32 retains the F0 single-row path.
+- A program owns a contiguous interval of row blocks. Each block loads a
+  `[BLOCK_ROWS,2048]` tile, writes the FP32 pre-normalization residual, performs
+  independent RMS reductions along the 2048-column axis, and writes BF16
+  normalized output.
+- Runtime M remains in `do_not_specialize`; `BLOCK_ROWS` is one of two fixed
+  schedule variants and is not derived into a distinct value for every M.
+- `hit_optimization_point: 3 (multi-row 2D task partition)`
 - `ir_has_more_suggestions: false`
