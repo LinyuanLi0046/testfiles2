@@ -36,31 +36,33 @@ another interpreter.
 
 ## Timed production contract
 
-The performance path mirrors the WeLM PPLN input-layer norm call:
+The active performance path mirrors the WeLM layer-1 input norm call:
 
 - `hidden_states`: contiguous `[M, 2048]` BF16;
 - `residual`: contiguous `[M, 2048]` FP32;
 - `weight`: contiguous `[2048]` BF16;
 - `eps=1e-5`;
-- `residual_after_layernorm=True`;
-- `clone_fp32_out=True`;
-- frozen baseline outputs: BF16 normalized output, its duplicate BF16 residual
-  copy, and the full FP32 normalized copy;
-- specialized candidate outputs: BF16 normalized output and the full FP32
-  normalized copy used as the next PPLN residual. The discarded duplicate BF16
-  output is neither allocated nor written.
+- `residual_after_layernorm=False`;
+- `clone_fp32_out=False`;
+- frozen baseline and specialized candidate outputs: BF16 normalized output
+  plus the FP32 pre-normalization `hidden + residual` value.
 
-The kernel first adds hidden and residual in FP32. `_do_rms_norm` then rounds
-that sum to the BF16 gamma dtype before converting back to FP32 for the square
-sum, reciprocal RMS, normalization, and gamma multiply. Correctness preserves
-this otherwise easy-to-miss production rounding boundary.
+The kernel first adds hidden and residual in FP32 and writes that exact FP32
+sum as `out_residual`. `_do_rms_norm` then rounds the sum to the BF16 gamma
+dtype before converting back to FP32 for the square sum, reciprocal RMS,
+normalization, and gamma multiply. Correctness preserves both the pre-norm
+residual timing and this easy-to-miss production rounding boundary.
+
+The previously retained `True + True` kernels remain in the benchmark source
+unchanged. The active provider mapping now validates and profiles only the
+`False + False` contract so a full automatic run stays the same duration.
 
 `hidden_dim=2048` is fixed. Dynamic M coverage is:
 
 - decode: `1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 128`;
 - prefill: `4096, 8192, 9616, 16361, 16384`.
 
-The frozen baseline retains the production dynamic kv parameters. The
+The frozen baseline retains the production dynamic kv parameters. The active
 contiguous-2D candidate removes M-derived kv/stride arguments and keeps `rows`
 in `do_not_specialize`. M and values derived from M must not become compile-time
 constants during optimization.
@@ -74,7 +76,7 @@ experiments; it is never authoritative in the automatic optimization loop.
 
 The standard run stores the following record types in one CSV:
 
-- `correctness`: all three outputs for independent frozen baseline/candidate;
+- `correctness`: both consumed outputs for independent frozen baseline/candidate;
 - `performance`: accepted Event or authoritative msprof latency;
 - `event_diagnostic`: superseded sub-30-us Event measurements;
 - `msprof_op_artifact`: compressed raw op/pipeline/timeline files;

@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """Standalone Ascend A5 benchmark for WeLM ``rms_norm_kernel``.
 
-The timed contract is the production PPLN input-norm call of
+The timed contract is the production layer-1 input-norm call of
 ``WelmV4FusedRMSNorm``:
 
 * hidden_states: contiguous BF16, [M, 2048]
 * residual: contiguous FP32, [M, 2048]
 * gamma: contiguous BF16 model parameter, [2048]
-* residual_after_layernorm=True and clone_fp32_out=True
-* frozen baseline outputs: BF16 normalized hidden, a duplicate BF16 normalized
-  residual copy, and the normalized FP32 copy consumed as the next residual
-* specialized candidate outputs: only the consumed BF16 normalized hidden and
-  normalized FP32 residual
+* residual_after_layernorm=False and clone_fp32_out=False
+* frozen baseline and specialized candidate outputs: BF16 normalized hidden
+  plus the FP32 pre-normalization ``hidden + residual`` value
 
 ``baseline`` is a frozen copy of the current NEWSGLANG implementation.
-``candidate`` specializes the dominant ``True + True`` branch by removing only
-the discarded BF16 copy. Future optimization rounds may edit only the clearly
+The retained ``True + True`` kernels remain in this file unchanged. The active
+``candidate`` specializes the model's ``False + False`` layer-1 branch with a
+non-null FP32 residual. Future optimization rounds may edit only the clearly
 marked candidate section and must preserve the arithmetic contract.
 """
 
@@ -273,9 +272,39 @@ def _candidate_multirow_rms_norm_kernel(
         tl.store(out_ptr + offsets, out.to(output_dtype), mask=mask)
 
 
+@triton.jit(do_not_specialize=["rows"])
+def _candidate_false_false_rms_norm_kernel(
+    hidden_states_ptr: tl.tensor,
+    residual_ptr: tl.tensor,
+    gamma_ptr: tl.tensor,
+    out_ptr: tl.tensor,
+    out_residual_ptr: tl.tensor,
+    rows: int,
+    cols: tl.constexpr,
+    eps: float,
+    BLOCK_SIZE: tl.constexpr,
+):
+    program_id = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    row_begin = program_id * rows // num_programs
+    row_end = (program_id + 1) * rows // num_programs
+    cols_off = tl.arange(0, BLOCK_SIZE)
+    gamma_shm = tl.load(gamma_ptr + cols_off)
+    output_dtype = out_ptr.dtype.element_ty
+    for row_id in tl.range(row_begin, row_end, num_stages=2):
+        offsets = row_id * cols + cols_off
+        hidden = tl.load(hidden_states_ptr + offsets).to(tl.float32)
+        residual = tl.load(residual_ptr + offsets).to(tl.float32)
+        norm_input = hidden + residual
+        tl.store(out_residual_ptr + offsets, norm_input)
+
+        out = _candidate_do_rms_norm(norm_input, gamma_shm, cols, eps)
+        tl.store(out_ptr + offsets, out.to(output_dtype))
+
+
 PROVIDERS = {
     "baseline": _baseline_rms_norm_kernel,
-    "candidate": _candidate_rms_norm_kernel,
+    "candidate": _candidate_false_false_rms_norm_kernel,
 }
 
 
@@ -284,7 +313,7 @@ class BoundLaunch:
     launch: Callable[[], object]
     output: torch.Tensor
     residual_out: torch.Tensor | None
-    fp32_out: torch.Tensor
+    fp32_out: torch.Tensor | None
 
 
 def repository_head() -> str:
@@ -341,12 +370,12 @@ class Harness:
             "residual_dtype": "float32",
             "weight_dtype": "bfloat16",
             "output_dtype": "bfloat16",
-            "residual_out_dtype": "bfloat16",
-            "fp32_out_dtype": "float32",
+            "residual_out_dtype": "float32",
+            "fp32_out_dtype": "omitted",
             "input_layout": "contiguous_2d",
-            "residual_after_layernorm": True,
-            "clone_fp32_out": True,
-            "model_context": "welmv4_ppln_input_layernorm",
+            "residual_after_layernorm": False,
+            "clone_fp32_out": False,
+            "model_context": "welmv4_prenorm_layer1_input_layernorm",
         }
 
     def bind(
@@ -359,29 +388,17 @@ class Harness:
         if cols != HIDDEN_DIM:
             raise ValueError(f"expected hidden_dim={HIDDEN_DIM}, got {cols}")
         output = torch.empty_like(hidden_states)
-        fp32_out = torch.empty_like(hidden_states, dtype=torch.float32)
-        use_prefill_2d = provider == "candidate" and rows >= PREFILL_2D_MIN_ROWS
-        use_decode_2d = (
-            provider == "candidate"
-            and DECODE_2D_MIN_ROWS <= rows <= DECODE_2D_MAX_ROWS
+        fp32_out = None
+        num_programs = min(
+            rows,
+            self.num_vector_cores
+            if provider == "candidate"
+            else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
         )
-        use_multirow = use_prefill_2d or use_decode_2d
-        block_rows = PREFILL_BLOCK_ROWS if use_prefill_2d else DECODE_BLOCK_ROWS
-        if use_multirow:
-            num_programs = min(
-                triton.cdiv(rows, block_rows), self.num_vector_cores
-            )
-        else:
-            num_programs = min(
-                rows,
-                self.num_vector_cores
-                if provider == "candidate"
-                else self.num_vector_cores * PROGRAMS_PER_VECTOR_CORE,
-            )
         kernel = PROVIDERS[provider]
 
         if provider == "baseline":
-            residual_out: torch.Tensor | None = torch.empty_like(hidden_states)
+            residual_out: torch.Tensor | None = torch.empty_like(residual)
 
             def launch() -> object:
                 return kernel[(num_programs,)](
@@ -398,35 +415,20 @@ class Harness:
                     hidden_states.shape[-2],
                     hidden_states.numel(),
                     residual.stride(0),
-                    True,
+                    False,
                     BLOCK_SIZE,
                 )
 
         elif provider == "candidate":
-            residual_out = None
-            if use_multirow:
-                kernel = _candidate_multirow_rms_norm_kernel
+            residual_out = torch.empty_like(residual)
 
             def launch() -> object:
-                if use_multirow:
-                    return kernel[(num_programs,)](
-                        hidden_states,
-                        residual,
-                        self.weight,
-                        output,
-                        fp32_out,
-                        rows,
-                        HIDDEN_DIM,
-                        EPS,
-                        BLOCK_SIZE,
-                        block_rows,
-                    )
                 return kernel[(num_programs,)](
                     hidden_states,
                     residual,
                     self.weight,
                     output,
-                    fp32_out,
+                    residual_out,
                     rows,
                     HIDDEN_DIM,
                     EPS,
@@ -456,7 +458,7 @@ def reference_outputs(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, None]:
     """Match the Triton helper's BF16 input round and FP32 reduction."""
     hidden_fp32 = hidden_states.float() + residual.float()
     norm_input = hidden_fp32.to(weight.dtype).float()
@@ -465,10 +467,10 @@ def reference_outputs(
         / HIDDEN_DIM
         + EPS
     )
-    fp32_out = norm_input * inv_rms * weight.float()
-    output = fp32_out.to(hidden_states.dtype)
-    residual_out = output.clone()
-    return output, residual_out, fp32_out
+    normalized_fp32 = norm_input * inv_rms * weight.float()
+    output = normalized_fp32.to(hidden_states.dtype)
+    residual_out = hidden_fp32.to(residual.dtype)
+    return output, residual_out, None
 
 
 def max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -477,17 +479,14 @@ def max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 def logical_bytes_for(case: Case, provider: str) -> int:
-    # Main tensors only. Baseline writes two BF16 copies; candidate writes one.
-    bytes_per_element = 14 if provider == "baseline" else 12
+    # Main tensors only: BF16 hidden + FP32 residual loads and BF16 + FP32 stores.
+    bytes_per_element = 12
     return case.rows * HIDDEN_DIM * bytes_per_element
 
 
 def kernel_name_for(case: Case, provider: str) -> str:
-    if provider == "candidate" and (
-        case.rows >= PREFILL_2D_MIN_ROWS
-        or DECODE_2D_MIN_ROWS <= case.rows <= DECODE_2D_MAX_ROWS
-    ):
-        return "_candidate_multirow_rms_norm_kernel"
+    if provider == "candidate":
+        return "_candidate_false_false_rms_norm_kernel"
     return f"_{provider}_rms_norm_kernel"
 
 
@@ -517,7 +516,7 @@ def run_correctness(
 ) -> tuple[list[dict[str, object]], int]:
     records: list[dict[str, object]] = []
     failures = 0
-    print("\nCorrectness (real WeLM PPLN input-norm contract):")
+    print("\nCorrectness (real WeLM False+False layer-1 input-norm contract):")
     for case in cases:
         hidden_states, residual = make_inputs(case, harness.device, harness.seed)
         validate_real_contract(hidden_states, residual, harness)
@@ -536,26 +535,20 @@ def run_correctness(
                 torch.testing.assert_close(
                     bound.output, expected[0], atol=OUTPUT_ATOL, rtol=OUTPUT_RTOL
                 )
-                if provider == "baseline":
-                    if bound.residual_out is None:
-                        raise AssertionError("baseline residual_out is missing")
-                    torch.testing.assert_close(
-                        bound.residual_out,
-                        expected[1],
-                        atol=OUTPUT_ATOL,
-                        rtol=OUTPUT_RTOL,
-                    )
-                elif bound.residual_out is not None:
-                    raise AssertionError("candidate must not allocate residual_out")
+                if bound.residual_out is None:
+                    raise AssertionError(f"{provider} residual_out is missing")
                 torch.testing.assert_close(
-                    bound.fp32_out, expected[2], atol=FP32_ATOL, rtol=FP32_RTOL
+                    bound.residual_out,
+                    expected[1],
+                    atol=FP32_ATOL,
+                    rtol=FP32_RTOL,
                 )
+                if bound.fp32_out is not None:
+                    raise AssertionError(f"{provider} must omit normalized FP32 output")
                 if bound.output.dtype != MODEL_DTYPE:
                     raise AssertionError(f"output dtype is {bound.output.dtype}")
-                if bound.residual_out is not None and bound.residual_out.dtype != MODEL_DTYPE:
-                    raise AssertionError("baseline residual_out must be BF16")
-                if bound.fp32_out.dtype != torch.float32:
-                    raise AssertionError("fp32_out must be FP32")
+                if bound.residual_out.dtype != torch.float32:
+                    raise AssertionError("residual_out must be FP32")
             except AssertionError as exc:
                 status = "FAIL"
                 detail = str(exc).replace("\n", " | ")
@@ -566,14 +559,14 @@ def run_correctness(
                 if bound.residual_out is not None
                 else None
             )
-            fp32_error = max_abs_error(bound.fp32_out, expected[2])
+            fp32_error = None
             residual_text = (
                 f"{residual_error:.6g}" if residual_error is not None else "omitted"
             )
             print(
                 f"  {case.name:<20} {provider:<10} {status:<4} "
                 f"out={output_error:.6g} residual={residual_text} "
-                f"fp32={fp32_error:.6g}"
+                "fp32=omitted"
             )
             records.append(
                 {
@@ -590,13 +583,9 @@ def run_correctness(
                     "max_abs_output": output_error,
                     "max_abs_residual_out": residual_error,
                     "max_abs_fp32_out": fp32_error,
-                    "reference_contract": "strict_production_ppln_input_norm",
-                    "fp32_out_contract": "written_and_validated",
-                    "residual_out_contract": (
-                        "materialized_and_validated"
-                        if provider == "baseline"
-                        else "omitted"
-                    ),
+                    "reference_contract": "strict_production_false_false_input_norm",
+                    "fp32_out_contract": "omitted",
+                    "residual_out_contract": "materialized_and_validated",
                 }
             )
         del expected, hidden_states, residual
@@ -1256,8 +1245,9 @@ def main() -> int:
     )
     print(
         "shape: [M, 2048], hidden/weight=BF16, residual=FP32, "
-        "baseline_outputs=(BF16, BF16, FP32), candidate_outputs=(BF16, FP32), "
-        "path=PPLN input norm"
+        "baseline_outputs=(BF16 normalized, FP32 pre-norm residual), "
+        "candidate_outputs=(BF16 normalized, FP32 pre-norm residual), "
+        "path=False+False layer-1 input norm"
     )
     if args.compile_only_provider:
         if len(cases) != 1:

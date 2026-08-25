@@ -890,3 +890,69 @@ revisit point 18 if the multi-case performance threshold requires it.
   removable tensor traffic, so no remaining skill point has a justified >=3%
   expectation without changing the operator boundary or using graph fusion.
 - `ir_has_more_suggestions: pending accuracy and msprof op`
+
+## False + False contract optimization
+
+# @architecture_decision("single-kernel-row-reduction", reason="RMS statistics and apply share the same [1,2048] row tile; splitting would add a full GM intermediate and a second launch")
+# @architecture_decision("physical-aiv-contiguous-partition", reason="A5 exposes 56 Vector cores; balanced contiguous row intervals avoid the frozen baseline's 8x over-subscription")
+# @architecture_decision("dynamic-M-stable-jit", reason="M changes per request and remains in do_not_specialize; only the fixed model N=2048 is constexpr")
+sketch welmv4_false_false_fused_rms_norm {
+  symbols: M;
+  tensors: hidden[M, 2048]: bf16;
+           residual[M, 2048]: f32;
+           gamma[2048]: bf16;
+           output[M, 2048]: bf16;
+           out_residual[M, 2048]: f32;
+  constexpr: N=2048, BLOCK_SIZE=2048;
+
+  num_programs = min(M, physical_vector_cores)
+
+  @llm_hint("parallel", "coreidx")
+  for program_id in range(num_programs):
+    row_begin = floor(program_id * M / num_programs)
+    row_end = floor((program_id + 1) * M / num_programs)
+    gamma_tile = alloc([2048], llm_hint=["fast", "input_cache"])
+    load(gamma[0:2048] -> gamma_tile)
+
+    @llm_hint("pipeline")
+    for row in range(row_begin, row_end):
+      hidden_tile = alloc([2048], llm_hint=["fast", "input_cache"])
+      residual_tile = alloc([2048], llm_hint=["fast", "input_cache"])
+      norm_input = alloc([2048], llm_hint=["fast", "temp_workspace"])
+      normalized = alloc([2048], llm_hint=["fast", "output_buffer"])
+
+      load(hidden[row, 0:2048] -> hidden_tile)
+      load(residual[row, 0:2048] -> residual_tile)
+      cast(hidden_tile, f32, hidden_tile)
+      add(hidden_tile, residual_tile, norm_input)
+      store(norm_input -> out_residual[row, 0:2048])
+
+      cast(norm_input, bf16, norm_input)
+      cast(norm_input, f32, norm_input)
+      mul(norm_input, norm_input, normalized)
+      reduce_sum(normalized, axis=0, dst=sum_square)
+      compute inv_rms = rsqrt(sum_square / 2048 + eps)
+      mul(norm_input, inv_rms, normalized)
+      mul(normalized, gamma_tile, normalized)
+      cast(normalized, bf16, normalized)
+      store(normalized -> output[row, 0:2048])
+}
+
+### F0 — False+False contract migration and physical-AIV partition (pending)
+
+- Freeze the actual layer-1 contract with non-null FP32 residual:
+  `out_residual = hidden.float() + residual.float()` is stored before the
+  required BF16 gamma-dtype rounding and RMS normalization; normalized FP32 is
+  not returned because `clone_fp32_out=False`.
+- The generic NEWSGLANG baseline remains unchanged and is launched with
+  `residual_after_layernorm=False`, `out_residual` FP32, and `out_copy=None`.
+- The first candidate is a dedicated dense `[M,2048]` single-row kernel. Grid
+  changes from at most `physical_AIV*8` to `min(M, physical_AIV)`, and each AIV
+  receives a balanced contiguous row interval. This is the sole latency point
+  in F0; multi-row tiling is deliberately deferred to F1.
+- Runtime M remains in `do_not_specialize`; no token/sequence/M-derived value
+  is constexpr. Fixed N/BLOCK=2048 are model-contract constants.
+- Both providers move the same 12 main bytes/element, so any F0 gain measures
+  scheduling/address simplification rather than output-traffic pruning.
+- `hit_optimization_point: 3`
+- `ir_has_more_suggestions: false`
